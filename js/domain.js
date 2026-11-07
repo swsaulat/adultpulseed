@@ -1,0 +1,833 @@
+/* PulseED — domain model: workflow rules, state transitions, timing and metrics.
+ * Pure functions only (no DOM, no storage) so every rule can be unit-tested in tests/tests.html. */
+(function (PE) {
+  'use strict';
+  const U = PE.util;
+  const D = (PE.domain = {});
+
+  D.WF = { vitals: 'Vitals Monitoring', bed: 'Awaiting ED Bed', procedure: 'Awaiting Procedure' };
+  D.WF_KEYS = ['vitals', 'bed', 'procedure'];
+  D.CTAS = ['CTAS 1', 'CTAS 2', 'CTAS 3', 'CTAS 4', 'CTAS 5', 'Other'];
+  D.PROC_STATUS = ['Awaiting', 'Ready', 'In Progress', 'Deferred', 'Done', 'Cancelled'];
+  D.PROC_TERMINAL = ['Done', 'Cancelled'];
+  D.CONSENT = ['Pending', 'Obtained', 'Not required', 'Declined'];
+  D.ARRANGED = ['No', 'Yes', 'N/A'];
+  D.EXIT_TYPES = {
+    placed: 'Placed on ED bed (moves to ED Beds)',
+    direct: 'Sent directly to ward / unit',
+    discharged: 'Discharged from waiting area',
+    lwbs: 'Left without being seen (LWBS)',
+    dama: 'Left against medical advice',
+    transferred: 'Transferred to another facility',
+    deceased: 'Deceased',
+    error: 'Entered in error',
+  };
+  D.EXIT_NEEDS_REASON = ['dama', 'transferred', 'error', 'deceased'];
+  // On an ED bed: the admission / referral decision starts the boarding clock; release frees the bed and closes the record.
+  D.DECISIONS = { admit: 'Admitted', refer: 'Referred to specialty' };
+  D.UNITS = ['Ward', 'ICU', 'CCU / HDU', 'Operating theatre', 'Other'];
+  D.RELEASE_TYPES = {
+    ward: 'Moved to ward', icu: 'Moved to ICU', ccu: 'Moved to CCU / HDU', theatre: 'To operating theatre',
+    home: 'Discharged home', transfer: 'Transferred to another facility', lama: 'Left against medical advice',
+    deceased: 'Deceased', other: 'Other (see release note)',
+  };
+
+  class RuleError extends Error { constructor(msg, code) { super(msg); this.code = code || 'RULE'; } }
+  D.RuleError = RuleError;
+  const fail = (msg, code) => { throw new RuleError(msg, code); };
+
+  D.emptyState = () => ({ schema: 2, rev: 0, patients: {}, events: [], chainAnchor: '0000000000000000', updatedAt: null });
+
+  D.isSupervisor = user => !!user && PE.SUPERVISOR_ROLES.includes(user.role);
+  D.isLeader = user => !!user && PE.LEADER_ROLES.includes(user.role);
+  D.activePatients = state => Object.values(state.patients).filter(p => p.status === 'active');
+  /** Patients on an ED bed (placed from the waiting area, not yet released). */
+  D.inEdPatients = state => Object.values(state.patients).filter(p => p.status === 'inED');
+  const onBoard = state => Object.values(state.patients).filter(p => p.status === 'active' || p.status === 'inED');
+  /** When the patient finally left: release from ED, otherwise the waiting-area exit. */
+  D.leftAt = p => (p.release ? p.release.time : p.exit ? p.exit.time : null);
+  /** The ED area of a bed: "Fast Track / Bed 12" → "Fast Track"; without " / ", "Acute Bed 07" → "Acute Bed". */
+  D.bedArea = bed => {
+    const b = String(bed || '');
+    if (b.includes(' / ')) return U.norm(b.split(' / ')[0]);
+    return U.norm(b.replace(/\s*\d+[A-Za-z]?$/, '')) || U.norm(b);
+  };
+  /** The bed's own name within its area: "Fast Track / Bed 12" → "Bed 12". */
+  D.bedLabel = bed => { const b = String(bed || ''); return b.includes(' / ') ? U.norm(b.split(' / ').slice(1).join(' / ')) : U.norm(b); };
+
+  // ------------------------------------------------------------------ front areas (screening, triage, reassessment)
+  // Short stops for waiting-area patients. They are not ED beds and each has a maximum stay with an alarm.
+  D.FRONT = { screening: 'Screening Unit Holding', triage: 'Adult Triage Unit', reassess: 'Reassessment Area' };
+  D.FRONT_KEYS = ['screening', 'triage', 'reassess'];
+  D.frontMax = (s, area) => ({ screening: s.screeningMaxMin, triage: s.triageMaxMin, reassess: s.reassessMaxMin }[area]);
+  D.frontSpots = (s, area) => (area === 'triage' ? s.triageBeds || [] : area === 'reassess' ? s.reassessBeds || [] : []);
+  D.frontText = f => (!f ? 'Waiting area' : f.area === 'screening' ? D.FRONT.screening : f.spot);
+  /** Minutes at the current front-area spot against its maximum. Amber from 2/3 of the limit, red (over) at the limit. */
+  D.frontTiming = (p, s, now = Date.now()) => {
+    if (!p.front) return null;
+    const mins = U.minsBetween(p.front.since, now), max = D.frontMax(s, p.front.area);
+    return { mins, max, over: mins >= max, level: mins >= max ? 'red' : mins >= max * 2 / 3 ? 'amber' : 'ok' };
+  };
+  /** Who is in each front area now. */
+  D.frontBoard = (state, s) => {
+    const a = D.activePatients(state).filter(p => p.front);
+    return {
+      screening: a.filter(p => p.front.area === 'screening'),
+      triage: D.frontSpots(s, 'triage').map(spot => ({ spot, p: a.find(p => p.front.area === 'triage' && U.key(p.front.spot) === U.key(spot)) || null })),
+      reassess: D.frontSpots(s, 'reassess').map(spot => ({ spot, p: a.find(p => p.front.area === 'reassess' && U.key(p.front.spot) === U.key(spot)) || null })),
+    };
+  };
+  D.activeWfs = p => D.WF_KEYS.filter(k => p.workflows[k] && p.workflows[k].active);
+
+  // ------------------------------------------------------------------ timing
+
+  /** Reassessment timing for the vitals workflow. */
+  D.vitalsTiming = (p, settings, now = Date.now()) => {
+    const v = p.workflows.vitals;
+    if (!v || !v.active) return { state: 'inactive', rank: 9 };
+    const iv = settings.ctasIntervals[p.ctas];
+    if (p.ctas === 'CTAS 1' || iv === 0) return { state: 'continuous', rank: 0, label: 'Continuous' };
+    if (!(iv > 0)) return { state: 'noTarget', rank: 5, label: 'No target — set CTAS' };
+    const base = U.toMs(v.lastReassessment || v.startTime);
+    const due = base + iv * 60000;
+    const diff = due - now;
+    const soonWin = Math.min(settings.dueSoonMaxMin, iv * settings.dueSoonFraction) * 60000;
+    if (diff < 0) {
+      const late = Math.floor(-diff / 60000);
+      return { state: 'overdue', rank: 1, due, intervalMin: iv, overdueMin: late, label: `${U.t24(due)} · overdue ${late < 1 ? '<1m' : U.dur(late)}` };
+    }
+    const left = Math.ceil(diff / 60000);
+    if (diff <= soonWin) return { state: 'dueSoon', rank: 2, due, intervalMin: iv, minsToDue: left, label: `${U.t24(due)} · in ${left}m` };
+    return { state: 'ok', rank: 3, due, intervalMin: iv, minsToDue: left, label: `${U.t24(due)} · in ${U.dur(left)}` };
+  };
+
+  D.waitLevel = (mins, amber, red) => (mins >= red ? 'red' : mins >= amber ? 'amber' : 'ok');
+  D.bedWait = (p, s, now = Date.now()) => {
+    const b = p.workflows.bed; const m = U.minsBetween(b.addedTime, b.placementTime || now);
+    return { mins: m, level: D.waitLevel(m, s.bedWaitAmberMin, s.bedWaitRedMin) };
+  };
+  /** Minutes on the ED bed, and the boarding clock that runs from the admission / referral decision. */
+  D.edStay = (p, now = Date.now()) => (p.ed ? U.minsBetween(p.ed.placedAt, now) : 0);
+  D.boarding = (p, s, now = Date.now()) => {
+    if (!p.ed || !p.ed.decision) return null;
+    const mins = U.minsBetween(p.ed.decision.time, now);
+    return { mins, level: D.waitLevel(mins, s.boardingAmberMin, s.boardingRedMin), overstay: mins >= s.boardingRedMin };
+  };
+  /**
+   * Every listed ED bed with its state: occupied (a patient in it), reserved (allocated to a waiting patient) or empty.
+   * Patients on a bed that is not in the Settings list are returned separately so nobody disappears from view.
+   */
+  D.bedBoard = (state, s, now = Date.now()) => {
+    const listed = U.uniq(s.beds || []);
+    const keys = new Set(listed.map(U.key));
+    const beds = listed.map(bed => {
+      const h = D.bedHolder(state, bed, null);
+      const st = !h ? 'empty' : h.occupied ? 'occupied' : 'reserved';
+      return { bed, area: D.bedArea(bed), state: st, p: h ? h.p : null, boarding: h && h.occupied ? D.boarding(h.p, s, now) : null };
+    });
+    const areas = U.uniq(beds.map(b => b.area));
+    const offList = D.inEdPatients(state).filter(p => !keys.has(U.key(p.ed.bed)));
+    const n = k => beds.filter(b => b.state === k).length;
+    return { beds, areas, offList, listed: beds.length, occupied: n('occupied'), reserved: n('reserved'), empty: n('empty') };
+  };
+  D.procWait = (p, s, now = Date.now()) => {
+    const r = p.workflows.procedure; const m = U.minsBetween(r.requestTime, r.completionTime || now);
+    return { mins: m, level: D.waitLevel(m, s.procWaitAmberMin, s.procWaitRedMin) };
+  };
+  /** Whether a procedure is actually able to go ahead. */
+  D.procReadiness = r => {
+    const issues = [];
+    if (r.consent === 'Pending') issues.push('Consent pending');
+    if (r.consent === 'Declined') issues.push('Consent declined');
+    if (r.arranged === 'No') issues.push('Not arranged');
+    return { ready: !issues.length, issues };
+  };
+
+  /** Most urgent first: CTAS 1 in waiting area, overdue (longest first), due soon, then by due time. */
+  D.byVitalsUrgency = (s, now) => (a, b) => {
+    const ta = D.vitalsTiming(a, s, now), tb = D.vitalsTiming(b, s, now);
+    if (ta.rank !== tb.rank) return ta.rank - tb.rank;
+    if (ta.state === 'overdue') return tb.overdueMin - ta.overdueMin;
+    return (ta.due || 0) - (tb.due || 0);
+  };
+
+  // ------------------------------------------------------------------ factories
+
+  const newVitals = (now, active) => ({ active, startTime: active ? U.iso(now) : null, lastReassessment: null, reassessments: [], endTime: null, endReason: null });
+  const newBed = (now, active, specialty) => ({
+    active, addedTime: active ? U.iso(now) : null, intendedSpecialty: active ? specialty : null, bedAllocated: false, allocatedBed: null,
+    firstAllocationTime: null, allocationTime: null, physicallyPlaced: false, placementTime: null, endTime: null, endReason: null,
+  });
+  const newProc = (now, active, d = {}) => ({
+    active, plannedProcedure: active ? d.plannedProcedure : null, consent: active ? d.consent : null, arranged: active ? d.arranged : null,
+    status: active ? 'Awaiting' : null, requestTime: active ? U.iso(now) : null, completionTime: null, endTime: null, endReason: null,
+  });
+
+  // ------------------------------------------------------------------ validation helpers
+
+  const URN_RE = /^[A-Za-z0-9][A-Za-z0-9\-\/.]{2,23}$/;
+  function validDetails(d, state, selfId) {
+    const out = {};
+    if ('urn' in d) {
+      out.urn = U.norm(d.urn).toUpperCase();
+      if (!URN_RE.test(out.urn)) fail('URN / MRN must be 3–24 letters, digits, "-", "/" or "." — copy it exactly from the EHR.');
+      const dup = onBoard(state).find(p => p.id !== selfId && U.key(p.urn) === U.key(out.urn));
+      if (dup) fail(`URN ${out.urn} is already ${dup.status === 'inED' ? 'on ED bed ' + dup.ed.bed : 'active on the board'} (${dup.name}). Open the existing record instead of creating a duplicate.`, 'DUPLICATE');
+    }
+    if ('encounterId' in d && d.encounterId != null) {
+      out.encounterId = U.norm(d.encounterId).toUpperCase();
+      if (out.encounterId && !URN_RE.test(out.encounterId)) fail('Encounter ID contains invalid characters.');
+      const dup = out.encounterId && onBoard(state).find(p => p.id !== selfId && U.key(p.encounterId) === U.key(out.encounterId));
+      if (dup) fail(`Encounter ${out.encounterId} is already in use by ${dup.urn}.`, 'DUPLICATE');
+    }
+    if ('name' in d) { out.name = U.norm(d.name); if (out.name.length < 2) fail('Patient name is required.'); }
+    if ('diagnosis' in d) { out.diagnosis = U.norm(d.diagnosis); if (!out.diagnosis) fail('Presenting complaint / diagnosis is required.'); }
+    if ('ctas' in d) { out.ctas = d.ctas; if (!D.CTAS.includes(out.ctas)) fail('Select a CTAS triage level.'); }
+    if ('team' in d) { out.team = U.norm(d.team); if (!out.team) fail('ED team is required.'); }
+    if ('physician' in d) out.physician = U.norm(d.physician) || 'Unassigned';
+    return out;
+  }
+  function validProcFields(d) {
+    const plannedProcedure = U.norm(d.plannedProcedure);
+    if (!plannedProcedure) fail('Planned procedure / imaging is required.');
+    if (!D.CONSENT.includes(d.consent)) fail('Select a consent status.');
+    if (!D.ARRANGED.includes(d.arranged)) fail('Select whether the procedure is arranged.');
+    return { plannedProcedure, consent: d.consent, arranged: d.arranged };
+  }
+  /** Who has this bed: a patient lying in it (occupied) first, otherwise a waiting patient it is allocated to (reserved). */
+  D.bedHolder = (state, bed, selfId) => {
+    const k = U.key(bed);
+    const occ = D.inEdPatients(state).find(p => p.id !== selfId && U.key(p.ed.bed) === k);
+    if (occ) return { p: occ, urn: occ.urn, occupied: true };
+    const res = D.activePatients(state).find(p => p.id !== selfId && p.workflows.bed && p.workflows.bed.active && p.workflows.bed.bedAllocated && U.key(p.workflows.bed.allocatedBed) === k);
+    return res ? { p: res, urn: res.urn, occupied: false } : null;
+  };
+  const bedHolder = D.bedHolder;
+
+  // ------------------------------------------------------------------ reducer
+
+  /**
+   * Apply one action to the freshest state. Returns { state, events, patient }.
+   * ctx = { user:{name, role}, device, now(ms), settings }
+   * Throws RuleError when a rule blocks the action (nothing is changed).
+   */
+  D.apply = function (state0, action, ctx) {
+    const state = U.clone(state0);
+    const now = ctx.now;
+    const s = ctx.settings;
+    const user = ctx.user;
+    if (!user || !user.name) fail('Sign in to the station before making changes.', 'AUTH');
+    const events = [];
+    const ev = (p, workflow, eventType, prev, next, notes, id) => events.push({
+      id: id || U.uuid(), ts: U.iso(now), patientId: p ? p.id : null, urn: p ? p.urn : '', encounterId: p ? p.encounterId : '',
+      workflow, eventType, prev: prev == null ? '' : String(prev), next: next == null ? '' : String(next),
+      user: user.name, role: user.role, device: ctx.device || '', notes: notes || '',
+    });
+    const a = action.payload || {};
+    const get = () => {
+      const p = state.patients[a.id];
+      if (!p) fail('Patient record not found — it may have been removed on another station.', 'NOT_FOUND');
+      if (a.expectedVersion != null && p.version !== a.expectedVersion && action.type !== 'RECORD_REASSESSMENT')
+        fail(`${p.urn} was changed by ${p.updatedBy || 'another user'} at ${U.t24(p.updatedAt)} while you were editing. Re-open it to see the latest details.`, 'CONFLICT');
+      return p;
+    };
+    const getActive = () => { const p = get(); if (p.status !== 'active') fail(`${p.urn} has already ${p.status === 'inED' ? 'left the waiting area (on ED bed ' + p.ed.bed + ')' : 'exited'}.`, 'EXITED'); return p; };
+    const getInEd = () => { const p = get(); if (p.status !== 'inED') fail(`${p.urn} is not on an ED bed.`, 'EXITED'); return p; };
+    const getOnBoard = () => { const p = get(); if (p.status !== 'active' && p.status !== 'inED') fail(`${p.urn} has already been released.`, 'EXITED'); return p; };
+    const touch = p => { p.version = (p.version || 0) + 1; p.updatedAt = U.iso(now); p.updatedBy = user.name; };
+    const archive = (p, key) => { (p.pastEpisodes = p.pastEpisodes || []).push(Object.assign({ wf: key, ctas: p.ctas }, U.clone(p.workflows[key]))); };
+    /** Validate a front-area destination ('' = the waiting area). Named beds hold one patient; screening holds up to its capacity. */
+    const frontSpot = (area, spot, selfId) => {
+      if (!area) return null;
+      if (!D.FRONT[area]) fail('Unknown area.');
+      const others = D.activePatients(state).filter(x => x.id !== selfId && x.front && x.front.area === area);
+      if (area === 'screening') {
+        if (others.length >= s.screeningCapacity) fail(`The ${D.FRONT.screening} is full (${s.screeningCapacity} patients). Move someone to triage or the waiting area first.`, 'AREA_FULL');
+        return { area, spot: D.FRONT.screening, since: U.iso(now) };
+      }
+      const name = D.frontSpots(s, area).find(x => U.key(x) === U.key(spot));
+      if (!name) fail(`Choose one of the ${D.FRONT[area]} beds.`);
+      const holder = others.find(x => U.key(x.front.spot) === U.key(name));
+      if (holder) fail(`${name} is in use by ${holder.urn}. Move that patient on first.`, 'AREA_FULL');
+      return { area, spot: name, since: U.iso(now) };
+    };
+
+    let p = null;
+    switch (action.type) {
+      case 'ADMIT': {
+        const det = validDetails({ urn: a.urn, encounterId: a.encounterId || '', name: a.name, diagnosis: a.diagnosis, ctas: a.ctas, team: a.team, physician: a.physician }, state, null);
+        const wf = a.workflows || {};
+        if (!wf.vitals && !wf.bed && !wf.procedure) fail('Enrol the patient in at least one workflow.');
+        let specialty = null, proc = {};
+        if (wf.bed) { specialty = U.norm(a.intendedSpecialty); if (!specialty) fail('Intended specialty is required for Awaiting ED Bed.'); }
+        if (wf.procedure) proc = validProcFields(a);
+        if (!det.encounterId) det.encounterId = 'ENC-' + U.stamp(now).replace('-', '') + '-' + Math.floor(Math.random() * 900 + 100);
+        const front = frontSpot(a.frontArea || '', a.frontSpot, null);
+        p = Object.assign({ id: a.id || U.uuid(), status: 'active', exit: null, front, createdAt: U.iso(now), createdBy: user.name, version: 0, pastEpisodes: [] }, det);
+        p.workflows = { vitals: newVitals(now, !!wf.vitals), bed: newBed(now, !!wf.bed, specialty), procedure: newProc(now, !!wf.procedure, proc) };
+        touch(p);
+        state.patients[p.id] = p;
+        const names = D.activeWfs(p).map(k => D.WF[k]);
+        ev(p, names.join(', '), 'Patient Registered', 'None', 'Active', `${p.name} · ${p.ctas} · ${p.team} · ${p.diagnosis}. Enrolled in: ${names.join(', ')}.`);
+        D.activeWfs(p).forEach(k => ev(p, D.WF[k], 'Episode Started', 'None', 'Active',
+          k === 'bed' ? `Intended specialty: ${specialty}` : k === 'procedure' ? `${proc.plannedProcedure} · consent ${proc.consent} · arranged ${proc.arranged}` : `Interval: ${intervalText(p.ctas, s)}`));
+        if (p.ctas === 'CTAS 1') ev(p, D.WF.vitals, 'Safety Alert', '', 'CTAS 1 in waiting area', 'CTAS 1 patients require immediate resuscitation-area care and continuous observation.');
+        if (front) ev(p, 'Front Areas', 'Location Set', 'Arrival', D.frontText(front), `Maximum stay ${D.frontMax(s, front.area)} min.`);
+        break;
+      }
+
+      case 'MOVE_FRONT': {
+        p = getActive();
+        const area = a.area || '';
+        const prev = p.front;
+        if (!area && !prev) fail(`${p.urn} is already in the waiting area.`, 'NOCHANGE');
+        if (area && prev && prev.area === area && (area === 'screening' || U.key(prev.spot) === U.key(a.spot))) fail(`${p.urn} is already there.`, 'NOCHANGE');
+        const next = frontSpot(area, a.spot, p.id);
+        const stay = prev ? D.frontTiming(p, s, now) : null;
+        p.front = next;
+        touch(p);
+        ev(p, 'Front Areas', 'Location Changed', D.frontText(prev), D.frontText(next),
+          `${stay ? `After ${U.dur(stay.mins)} in ${D.frontText(prev)}${stay.over ? ' (over its ' + stay.max + ' min limit)' : ''}.` : ''}${next ? ` Maximum stay ${D.frontMax(s, next.area)} min.` : ''}${a.note ? ' ' + U.norm(a.note) : ''}`.trim());
+        break;
+      }
+
+      case 'UPDATE_DETAILS': {
+        p = getOnBoard();
+        const det = validDetails(a.changes || {}, state, p.id);
+        const changed = Object.keys(det).filter(k => det[k] !== p[k]);
+        if (!changed.length) fail('No changes to save.', 'NOCHANGE');
+        changed.forEach(k => {
+          const label = { urn: 'URN', encounterId: 'Encounter ID', name: 'Name', diagnosis: 'Diagnosis', ctas: 'CTAS', team: 'Team', physician: 'Physician' }[k];
+          ev(p, k === 'ctas' ? D.WF.vitals : 'Patient Details', k === 'ctas' ? 'Re-triaged' : `${label} Updated`, p[k], det[k], a.note || '');
+          p[k] = det[k];
+        });
+        touch(p);
+        break;
+      }
+
+      case 'RECORD_REASSESSMENT': {
+        p = getActive();
+        const v = p.workflows.vitals;
+        if (!v.active) fail(`${p.urn} is not on vitals monitoring.`);
+        let t = a.time ? U.toMs(a.time) : now;
+        if (isNaN(t)) fail('Invalid reassessment time.');
+        if (t > now + 60000) fail('Reassessment time cannot be in the future.');
+        if (t < now - s.backdateMaxMin * 60000) fail(`Reassessments can only be back-dated up to ${s.backdateMaxMin} minutes. Document older observations in the EHR.`);
+        const floor = U.toMs(v.lastReassessment || v.startTime);
+        // The time box has no seconds: a time in the same minute as the floor means "right after it", not before.
+        if (t < floor && Math.floor(t / 60000) === Math.floor(floor / 60000)) t = Math.min(floor + 1000, now);
+        if (t < floor) fail(`Time must be after the ${v.lastReassessment ? 'previous reassessment' : 'start of monitoring'} (${U.t24(floor)}).`);
+        const before = D.vitalsTiming(p, s, t);
+        v.reassessments.push(U.iso(t));
+        v.lastReassessment = U.iso(t);
+        touch(p);
+        const after = D.vitalsTiming(p, s, now);
+        ev(p, D.WF.vitals, 'Reassessment Recorded',
+          before.state === 'overdue' ? `Overdue ${U.dur(before.overdueMin)}` : before.label || 'Due',
+          after.due ? `Next due ${U.t24(after.due)}` : after.label,
+          `Observations taken ${U.t24(t)}${t < now - 60000 ? ' (back-dated)' : ''}; physiological values recorded in the EHR.${a.note ? ' ' + U.norm(a.note) : ''}`);
+        break;
+      }
+
+      case 'ALLOCATE_BED': {
+        p = getActive();
+        const b = p.workflows.bed;
+        if (!b.active) fail(`${p.urn} is not on the Awaiting ED Bed workflow.`);
+        const bed = U.norm(a.bed);
+        if (!bed) fail('Enter or select the bed being allocated.');
+        const specialty = U.norm(a.specialty) || b.intendedSpecialty;
+        if (!specialty) fail('Intended specialty is required.');
+        const holder = bedHolder(state, bed, p.id);
+        if (holder && !a.override) fail(holder.occupied ? `${bed} is occupied by ${holder.urn}. Reserve it only if that patient is about to leave (confirm the override).` : `${bed} is already allocated to ${holder.urn}. Confirm the override only if that allocation is wrong.`, 'BED_TAKEN');
+        if (b.bedAllocated && U.key(b.allocatedBed) === U.key(bed) && specialty === b.intendedSpecialty) fail('No changes to save.', 'NOCHANGE');
+        const prev = b.bedAllocated ? `Allocated (${b.allocatedBed})` : 'Unallocated';
+        if (specialty !== b.intendedSpecialty) ev(p, D.WF.bed, 'Specialty Changed', b.intendedSpecialty, specialty, '');
+        b.intendedSpecialty = specialty;
+        if (!b.bedAllocated || U.key(b.allocatedBed) !== U.key(bed)) {
+          ev(p, D.WF.bed, b.bedAllocated ? 'Bed Re-allocated' : 'Bed Allocated', prev, `Allocated (${bed})`,
+            (holder ? `Override: ${bed} was also allocated to ${holder.urn}. ` : '') + (a.note ? U.norm(a.note) : ''));
+          b.bedAllocated = true; b.allocatedBed = bed; b.allocationTime = U.iso(now);
+          if (!b.firstAllocationTime) b.firstAllocationTime = U.iso(now);
+        }
+        touch(p);
+        break;
+      }
+
+      case 'UNALLOCATE_BED': {
+        p = getActive();
+        const b = p.workflows.bed;
+        if (!b.active || !b.bedAllocated) fail('No bed is allocated.');
+        const reason = U.norm(a.reason); if (!reason) fail('Give a reason for releasing the bed.');
+        ev(p, D.WF.bed, 'Bed Released', `Allocated (${b.allocatedBed})`, 'Unallocated', reason);
+        b.bedAllocated = false; b.allocatedBed = null; b.allocationTime = null;
+        touch(p);
+        break;
+      }
+
+      case 'UPDATE_PROCEDURE': {
+        p = getActive();
+        const r = p.workflows.procedure;
+        if (!r.active) fail(`${p.urn} has no active procedure.`);
+        const f = validProcFields({ plannedProcedure: a.plannedProcedure || r.plannedProcedure, consent: a.consent, arranged: a.arranged });
+        const status = a.status;
+        if (!D.PROC_STATUS.includes(status)) fail('Select a procedure status.');
+        const note = U.norm(a.note);
+        if (['Ready', 'In Progress', 'Done'].includes(status)) {
+          if (f.consent === 'Pending' || f.consent === 'Declined') fail(`Cannot mark "${status}" while consent is ${f.consent.toLowerCase()}.`);
+          if (status !== 'Done' && f.arranged === 'No') fail(`Cannot mark "${status}" until the procedure is arranged.`);
+        }
+        if ((status === 'Cancelled' || status === 'Deferred') && !note) fail(`A reason is required to mark the procedure ${status.toLowerCase()}.`);
+        const changes = [];
+        if (f.plannedProcedure !== r.plannedProcedure) changes.push(['Procedure Changed', r.plannedProcedure, f.plannedProcedure]);
+        if (f.consent !== r.consent) changes.push(['Consent Updated', r.consent, f.consent]);
+        if (f.arranged !== r.arranged) changes.push(['Arrangement Updated', r.arranged, f.arranged]);
+        if (status !== r.status) changes.push(['Procedure Status Updated', r.status, status]);
+        if (!changes.length) fail('No changes to save.', 'NOCHANGE');
+        changes.forEach(c => ev(p, D.WF.procedure, c[0], c[1], c[2], note));
+        Object.assign(r, f, { status });
+        if (status === 'Done') { r.completionTime = U.iso(now); r.active = false; r.endTime = U.iso(now); r.endReason = 'Completed'; }
+        if (status === 'Cancelled') { r.active = false; r.endTime = U.iso(now); r.endReason = 'Cancelled: ' + note; }
+        if (!r.active) ev(p, D.WF.procedure, 'Episode Closed', status, 'Closed', r.endReason);
+        touch(p);
+        break;
+      }
+
+      case 'START_WORKFLOW': {
+        p = getActive();
+        const k = a.wf;
+        if (!D.WF[k]) fail('Unknown workflow.');
+        if (p.workflows[k].active) fail(`${p.urn} is already on ${D.WF[k]}.`);
+        let note = '';
+        if (k === 'vitals') { if (p.workflows.vitals.startTime) archive(p, k); p.workflows.vitals = newVitals(now, true); note = `Interval: ${intervalText(p.ctas, s)}`; }
+        if (k === 'bed') {
+          const sp = U.norm(a.intendedSpecialty); if (!sp) fail('Intended specialty is required.');
+          if (p.workflows.bed.addedTime) archive(p, k); p.workflows.bed = newBed(now, true, sp); note = `Intended specialty: ${sp}`;
+        }
+        if (k === 'procedure') {
+          const f = validProcFields(a);
+          if (p.workflows.procedure.requestTime) archive(p, k); p.workflows.procedure = newProc(now, true, f);
+          note = `${f.plannedProcedure} · consent ${f.consent} · arranged ${f.arranged}`;
+        }
+        ev(p, D.WF[k], 'Episode Started', 'None', 'Active', note);
+        touch(p);
+        break;
+      }
+
+      case 'STOP_WORKFLOW': {
+        p = getActive();
+        const k = a.wf, w = p.workflows[k];
+        if (!w || !w.active) fail('That workflow is not active.');
+        const reason = U.norm(a.reason); if (!reason) fail('Give a reason for ending this workflow.');
+        w.active = false; w.endTime = U.iso(now); w.endReason = reason;
+        if (k === 'procedure') w.status = 'Closed - Not Performed';
+        if (k === 'bed') { w.bedAllocated = false; }
+        ev(p, D.WF[k], 'Episode Ended', 'Active', 'Ended', reason);
+        touch(p);
+        break;
+      }
+
+      case 'EXIT': {
+        p = getActive();
+        const type = a.type;
+        if (!D.EXIT_TYPES[type]) fail('Select how the patient left the waiting area.');
+        const reason = U.norm(a.reason);
+        if (D.EXIT_NEEDS_REASON.includes(type) && !reason) fail('A reason / note is required for this disposition.');
+        let bed = null;
+        if (type === 'placed') {
+          bed = U.norm(a.bed) || (p.workflows.bed.bedAllocated ? p.workflows.bed.allocatedBed : '');
+          if (!bed) fail('Enter the ED bed the patient was physically placed in.');
+          const holder = bedHolder(state, bed, p.id);
+          if (holder && !a.override) fail(holder.occupied ? `${bed} is occupied by ${holder.urn}. Release or move that patient first, or confirm the override if the bed record is wrong.` : `${bed} is still allocated to ${holder.urn} on the waiting list. Confirm the override if they are not going to that bed.`, 'BED_TAKEN');
+        }
+        const snapshot = U.clone(p.workflows);
+        const closed = D.activeWfs(p);
+        const label = D.EXIT_TYPES[type];
+        const t = U.iso(now);
+        const v = p.workflows.vitals, b = p.workflows.bed, r = p.workflows.procedure;
+        if (v.active) Object.assign(v, { active: false, endTime: t, endReason: 'Exit: ' + label });
+        if (b.active) {
+          Object.assign(b, { active: false, endTime: t, endReason: 'Exit: ' + label });
+          if (type === 'placed') Object.assign(b, { physicallyPlaced: true, placementTime: t, allocatedBed: bed, bedAllocated: true });
+        }
+        if (r.active) Object.assign(r, { active: false, endTime: t, endReason: 'Exit: ' + label, status: 'Closed - Exited Scope' });
+        // Placed patients leave the waiting area but stay on the ED Beds board until released.
+        p.status = type === 'placed' ? 'inED' : 'exited';
+        p.front = null; // leaving the waiting area frees any screening / triage / reassessment place
+        p.exit = { type, label, time: t, bed, reason, by: user.name, closedWorkflows: closed, snapshot };
+        if (type === 'placed') p.ed = { bed, area: D.bedArea(bed), placedAt: t, placedBy: user.name, decision: null, moves: [] };
+        touch(p);
+        ev(p, type === 'placed' ? 'Global Exit (ED Bed Placement)' : 'Global Exit (Disposition)', type === 'placed' ? 'Physical Bed Placement' : 'Patient Exited',
+          'Waiting Area Active', type === 'placed' ? `On ED bed ${bed}` : 'Closed / Exited Scope',
+          `${label}${bed ? ` — ${bed}` : ''}. Closed: ${closed.map(k => D.WF[k]).join(', ') || 'no active workflows'}. Unfinished procedures closed without being marked Done.${reason ? ' Note: ' + reason : ''}`);
+        if (type === 'placed' && closed.indexOf('bed') < 0) ev(p, D.WF.bed, 'Bed Placement (not on bed list)', '', bed, 'Placed without an Awaiting ED Bed episode.');
+        break;
+      }
+
+      case 'ED_DECISION': {
+        p = getInEd();
+        const kind = a.decision;
+        if (!D.DECISIONS[kind]) fail('Choose Admitted or Referred to specialty.');
+        const specialty = U.norm(a.specialty) || (p.workflows.bed && p.workflows.bed.intendedSpecialty) || '';
+        if (!specialty) fail('Enter the admitting / receiving specialty.');
+        const unit = D.UNITS.includes(a.unit) ? a.unit : '';
+        const note = U.norm(a.note);
+        const d0 = p.ed.decision;
+        const text = d => `${D.DECISIONS[d.type]} — ${d.specialty}${d.unit ? ' (' + d.unit + ')' : ''}`;
+        if (d0 && d0.type === kind && d0.specialty === specialty && d0.unit === unit) fail('No changes to save.', 'NOCHANGE');
+        // The boarding clock runs from the first decision; changing the specialty or unit does not restart it.
+        p.ed.decision = { type: kind, specialty, unit, time: d0 ? d0.time : U.iso(now), by: d0 ? d0.by : user.name, updatedBy: user.name, note };
+        touch(p);
+        ev(p, 'ED Bed / Boarding', d0 ? 'Decision Updated' : kind === 'admit' ? 'Admission Decision' : 'Referred to Specialty',
+          d0 ? text(d0) : `On ED bed ${p.ed.bed}`, text(p.ed.decision),
+          `${d0 ? 'Boarding clock unchanged (from ' + U.t24(d0.time) + ').' : 'Boarding clock started; overstay alarm after ' + U.dur(s.boardingRedMin) + '.'}${note ? ' ' + note : ''}`);
+        break;
+      }
+
+      case 'ED_CANCEL_DECISION': {
+        p = getInEd();
+        if (!p.ed.decision) fail('There is no admission / referral decision to cancel.');
+        const reason = U.norm(a.reason); if (!reason) fail('Give a reason, e.g. referral declined by the specialty.');
+        const d0 = p.ed.decision;
+        p.ed.decision = null;
+        touch(p);
+        ev(p, 'ED Bed / Boarding', 'Decision Cancelled', `${D.DECISIONS[d0.type]} — ${d0.specialty}`, `On ED bed ${p.ed.bed}`, `${reason}. Boarding clock stopped.`);
+        break;
+      }
+
+      case 'ED_MOVE': {
+        p = getInEd();
+        const bed = U.norm(a.bed);
+        if (!bed) fail('Enter the bed the patient is moving to.');
+        if (U.key(bed) === U.key(p.ed.bed)) fail('The patient is already in that bed.', 'NOCHANGE');
+        const holder = bedHolder(state, bed, p.id);
+        if (holder && holder.occupied) fail(`${bed} is occupied by ${holder.urn}.`, 'BED_OCCUPIED');
+        if (holder && !a.override) fail(`${bed} is reserved for ${holder.urn} on the waiting list. Confirm the override to use it anyway.`, 'BED_TAKEN');
+        const from = p.ed.bed;
+        p.ed.moves.push({ from, to: bed, time: U.iso(now), by: user.name });
+        p.ed.bed = bed; p.ed.area = D.bedArea(bed);
+        touch(p);
+        ev(p, 'ED Bed / Boarding', 'Bed Moved', from, bed, `${from} is now empty.${a.note ? ' ' + U.norm(a.note) : ''}`);
+        break;
+      }
+
+      case 'ED_RELEASE': {
+        p = getInEd();
+        const type = a.type;
+        if (!D.RELEASE_TYPES[type]) fail('Select where the patient went.');
+        const note = U.norm(a.note);
+        if (note.length < 5) fail('Write the release note before releasing the patient from the ED.');
+        const label = D.RELEASE_TYPES[type];
+        const board = D.boarding(p, s, now);
+        p.status = 'exited';
+        p.release = { type, label, time: U.iso(now), note, by: user.name, bed: p.ed.bed, edStayMin: D.edStay(p, now), boardingMin: board ? board.mins : null };
+        touch(p);
+        ev(p, 'ED Bed / Boarding', 'Released from ED', `On ED bed ${p.ed.bed}`, `${label} · ${p.ed.bed} empty`,
+          `${note} · On ED bed ${U.dur(p.release.edStayMin)}${board ? `; boarded ${U.dur(board.mins)}${board.overstay ? ' (overstay)' : ''}` : ''}.`);
+        break;
+      }
+
+      case 'REOPEN': {
+        p = get();
+        const last = p.release || p.exit;
+        if (p.status === 'active' || !last) fail('Patient is already active.');
+        const ownRecent = last.by === user.name && now - U.toMs(last.time) < 10 * 60000;
+        if (!ownRecent && !D.isSupervisor(user)) fail(`Only a Charge Nurse, ED Leader or Admin can reverse ${p.status === 'inED' ? 'a bed placement' : 'an exit'} made by someone else or more than 10 minutes ago.`, 'FORBIDDEN');
+        const reason = U.norm(a.reason); if (!reason) fail('Give a reason for reopening.');
+        const dup = onBoard(state).find(x => x.id !== p.id && U.key(x.urn) === U.key(p.urn));
+        if (dup) fail(`URN ${p.urn} has been re-registered since; use that record.`, 'DUPLICATE');
+        if (p.status === 'exited' && p.release) {
+          // Released by mistake: back onto the same ED bed, as long as nobody else is in it now.
+          const holder = bedHolder(state, p.release.bed, p.id);
+          if (holder && holder.occupied) fail(`${p.release.bed} is now occupied by ${holder.urn}; move that patient first.`, 'BED_TAKEN');
+          const prev = p.release;
+          p.status = 'inED'; p.release = null;
+          touch(p);
+          ev(p, 'ED Bed / Boarding', 'Release Reversed', prev.label, `On ED bed ${p.ed.bed}`, `${reason}. Boarding clock continues from its original time.`);
+          break;
+        }
+        const prevExit = p.exit;
+        p.workflows = prevExit.snapshot;
+        p.status = 'active'; p.exit = null; p.ed = null; p.front = null; // back in the waiting area (its previous spot may be taken)
+        touch(p);
+        ev(p, 'Global Exit', prevExit.type === 'placed' ? 'Bed Placement Reversed' : 'Exit Reversed', prevExit.label, 'Waiting Area Active', `${reason}. Restored: ${D.activeWfs(p).map(k => D.WF[k]).join(', ') || 'none'}. Timers continue from their original times.`);
+        break;
+      }
+
+      case 'SYSTEM_BOARDING': {
+        // One "Boarding Overstay" event per decision (deterministic id), logged by the server watchdog or the leader station.
+        p = state.patients[a.id];
+        const b = p && p.status === 'inED' ? D.boarding(p, s, now) : null;
+        if (!b || !b.overstay) return { state: state0, events: [], patient: null };
+        const id = `brd-${p.id}-${U.toMs(p.ed.decision.time)}`;
+        // Marked on the record as well as by event id: on a busy day the event may have scrolled out of the server's recent window.
+        if (p.ed.overstayLogged === id || state.events.some(e => e.id === id)) return { state: state0, events: [], patient: null };
+        p.ed.overstayLogged = id; // not touch(): no version bump, so nobody editing this patient gets a conflict
+        ev(p, 'ED Bed / Boarding', 'Boarding Overstay', `${D.DECISIONS[p.ed.decision.type]} ${U.t24(p.ed.decision.time)}`, `Over ${U.dur(s.boardingRedMin)} on ${p.ed.bed}`,
+          `${p.ed.decision.specialty}${p.ed.decision.unit ? ' · ' + p.ed.decision.unit : ''}: still on an ED bed ${U.dur(b.mins)} after the decision. Charge nurse to escalate the transfer.`, id);
+        events[events.length - 1].user = 'System';
+        events[events.length - 1].role = 'System';
+        break;
+      }
+
+      case 'SYSTEM_OVERDUE': {
+        // Logged once per overdue interval by the leader station; deterministic id makes it idempotent across stations.
+        p = state.patients[a.id];
+        if (!p || p.status !== 'active') return { state: state0, events: [], patient: null };
+        const t = D.vitalsTiming(p, s, now);
+        if (t.state !== 'overdue') return { state: state0, events: [], patient: null };
+        const id = `ovd-${p.id}-${t.due}`;
+        if (state.events.some(e => e.id === id)) return { state: state0, events: [], patient: null };
+        ev(p, D.WF.vitals, 'Reassessment Overdue', 'Active', 'Overdue', `Due ${U.t24(t.due)} (${p.ctas}, every ${t.intervalMin} min). Alert raised on ${ctx.device || 'station'}.`, id);
+        events[events.length - 1].user = 'System';
+        events[events.length - 1].role = 'System';
+        break;
+      }
+
+      default:
+        fail('Unknown action ' + action.type);
+    }
+
+    D.appendEvents(state, events);
+    state.rev = (state.rev || 0) + 1;
+    state.updatedAt = U.iso(now);
+    return { state, events, patient: p ? state.patients[p.id] : null };
+  };
+
+  function intervalText(ctas, s) {
+    const iv = s.ctasIntervals[ctas];
+    return ctas === 'CTAS 1' || iv === 0 ? 'continuous' : iv > 0 ? `every ${iv} min (${ctas})` : 'no target set';
+  }
+
+  // ------------------------------------------------------------------ audit chain
+
+  const eventBody = e => [e.id, e.ts, e.patientId, e.urn, e.encounterId, e.workflow, e.eventType, e.prev, e.next, e.user, e.role, e.device, e.notes].join('|');
+  D.appendEvents = (state, events) => {
+    let prev = state.events.length ? state.events[state.events.length - 1].hash : state.chainAnchor;
+    events.forEach(e => { e.prevHash = prev; e.hash = U.hash(prev + '|' + eventBody(e)); prev = e.hash; state.events.push(e); });
+  };
+  /** Returns { ok, checked, brokenAt } — detects any edited, inserted or deleted audit row. */
+  D.verifyChain = state => {
+    let prev = state.chainAnchor;
+    for (let i = 0; i < state.events.length; i++) {
+      const e = state.events[i];
+      if (e.prevHash !== prev || e.hash !== U.hash(prev + '|' + eventBody(e))) return { ok: false, checked: i, brokenAt: e };
+      prev = e.hash;
+    }
+    return { ok: true, checked: state.events.length };
+  };
+
+  /** Drop exited patients and events past retention. Keeps the chain verifiable by moving the anchor. */
+  D.purge = (state0, s, now) => {
+    const state = U.clone(state0);
+    let changed = false;
+    Object.values(state.patients).forEach(p => {
+      if (p.status === 'exited' && now - U.toMs(D.leftAt(p)) > s.exitedRetentionHours * 3600000) { delete state.patients[p.id]; changed = true; }
+    });
+    const cutoff = now - s.eventRetentionHours * 3600000;
+    let n = 0; while (n < state.events.length && U.toMs(state.events[n].ts) < cutoff) n++;
+    if (n) { state.chainAnchor = state.events[n - 1].hash; state.events = state.events.slice(n); changed = true; }
+    return changed ? state : null;
+  };
+
+  // ------------------------------------------------------------------ metrics (computed from real data)
+
+  function episodes(state, key) {
+    const out = [];
+    Object.values(state.patients).forEach(p => {
+      (p.pastEpisodes || []).filter(e => e.wf === key).forEach(e => out.push({ p, e, ctas: e.ctas }));
+      const w = p.workflows[key];
+      if (w && (w.startTime || w.addedTime || w.requestTime)) out.push({ p, e: w, ctas: p.ctas });
+    });
+    return out;
+  }
+
+  D.metrics = (state, s, now = Date.now(), hours = 24) => {
+    const from = now - hours * 3600000;
+    const startHour = new Date(now); startHour.setMinutes(0, 0, 0);
+    const firstBucket = startHour.getTime() - (hours - 1) * 3600000;
+    const bucketOf = ms => Math.floor((ms - firstBucket) / 3600000);
+    const labels = Array.from({ length: hours }, (_, i) => U.t24(firstBucket + i * 3600000));
+    const series = () => Array.from({ length: hours }, () => []);
+
+    const alloc = [], place = [], tat = [];
+    const allocH = series(), placeH = series(), tatH = series(), compH = series();
+
+    episodes(state, 'bed').forEach(({ e }) => {
+      const added = U.toMs(e.addedTime);
+      const fa = U.toMs(e.firstAllocationTime);
+      if (!isNaN(fa) && fa >= from) { const m = (fa - added) / 60000; alloc.push(m); const b = bucketOf(fa); if (b >= 0 && b < hours) allocH[b].push(m); }
+      const pt = U.toMs(e.placementTime);
+      if (e.physicallyPlaced && !isNaN(pt) && pt >= from) { const m = (pt - added) / 60000; place.push(m); const b = bucketOf(pt); if (b >= 0 && b < hours) placeH[b].push(m); }
+    });
+    episodes(state, 'procedure').forEach(({ e }) => {
+      const ct = U.toMs(e.completionTime);
+      if (e.status === 'Done' && !isNaN(ct) && ct >= from) { const m = (ct - U.toMs(e.requestTime)) / 60000; tat.push(m); const b = bucketOf(ct); if (b >= 0 && b < hours) tatH[b].push(m); }
+    });
+    let dueCount = 0, onTime = 0;
+    const grace = s.complianceGraceMin * 60000;
+    episodes(state, 'vitals').forEach(({ e, ctas }) => {
+      const iv = s.ctasIntervals[ctas];
+      if (!(iv > 0)) return;
+      const times = [U.toMs(e.startTime), ...(e.reassessments || []).map(U.toMs)].sort((x, y) => x - y);
+      const end = e.endTime ? U.toMs(e.endTime) : now;
+      for (let i = 0; i < times.length; i++) {
+        const due = times[i] + iv * 60000;
+        if (due > end || due < from || due > now) continue; // only intervals that actually fell due during the episode
+        const ok = i + 1 < times.length && times[i + 1] <= due + grace;
+        dueCount++; if (ok) onTime++;
+        const b = bucketOf(due); if (b >= 0 && b < hours) compH[b].push(ok ? 100 : 0);
+      }
+    });
+    const avgSeries = h => h.map(a => (a.length ? U.round(U.mean(a), 1) : null));
+    const kpi = a => ({ n: a.length, mean: U.round(U.mean(a)), median: U.round(U.median(a)) });
+    return {
+      labels, hours,
+      bedAlloc: kpi(alloc), bedPlace: kpi(place), procTat: kpi(tat),
+      compliance: { n: dueCount, pct: dueCount ? U.round((onTime / dueCount) * 100) : null, median: U.round(U.median(compH.filter(x => x.length).map(U.mean))) },
+      hourly: { alloc: avgSeries(allocH), place: avgSeries(placeH), tat: avgSeries(tatH), compliance: avgSeries(compH) },
+    };
+  };
+
+  // ------------------------------------------------------------------ shifts
+
+  /**
+   * The shift containing `ms`. shifts = [[ 'HH:mm', name ], ...]; offsetMin = minutes east of UTC at the site.
+   * A shift runs from its start up to (not including) the next start, across midnight when needed.
+   */
+  D.shiftAt = (shifts, ms, offsetMin) => {
+    const list = shifts.map(x => ({ t: x[0], name: x[1] || '', m: Number(x[0].slice(0, 2)) * 60 + Number(x[0].slice(3)) })).sort((a, b) => a.m - b.m);
+    const mins = Math.floor(ms / 60000) + offsetMin, day = ((mins % 1440) + 1440) % 1440;
+    let i = list.length - 1; // before the first start of the day = still the last shift of yesterday
+    list.forEach((x, k) => { if (x.m <= day) i = k; });
+    const cur = list[i], next = list[(i + 1) % list.length];
+    const from = (mins - ((day - cur.m + 1440) % 1440) - offsetMin) * 60000;
+    return { name: cur.name, label: `${cur.t}–${next.t}`, from, to: from + ((next.m - cur.m + 1440) % 1440 || 1440) * 60000 };
+  };
+  D.shiftTitle = w => `${w.name ? w.name + ' shift' : 'Shift'} ${w.label}`;
+
+  /** What happened from `from` up to (not including) `to`; later events belong to the next shift. */
+  D.shiftStats = (state, s, from, to, now = Date.now()) => {
+    const end = Math.min(to, now), inWin = ms => !isNaN(ms) && ms >= from && ms < end;
+    const all = Object.values(state.patients);
+    const exited = all.filter(p => p.exit && inWin(U.toMs(p.exit.time))); // left the waiting area, including onto an ED bed
+    const released = all.filter(p => p.release && inWin(U.toMs(p.release.time)));
+    const byExit = {};
+    exited.forEach(p => { byExit[p.exit.label] = (byExit[p.exit.label] || 0) + 1; });
+    const lwbs = exited.filter(p => p.exit.type === 'lwbs' || p.exit.type === 'dama').length;
+    const alloc = [], place = [], tat = [];
+    episodes(state, 'bed').forEach(({ e }) => {
+      const added = U.toMs(e.addedTime), fa = U.toMs(e.firstAllocationTime), pt = U.toMs(e.placementTime);
+      if (inWin(fa)) alloc.push((fa - added) / 60000);
+      if (e.physicallyPlaced && inWin(pt)) place.push((pt - added) / 60000);
+    });
+    episodes(state, 'procedure').forEach(({ e }) => {
+      const ct = U.toMs(e.completionTime);
+      if (e.status === 'Done' && inWin(ct)) tat.push((ct - U.toMs(e.requestTime)) / 60000);
+    });
+    let due = 0, onTime = 0;
+    const grace = s.complianceGraceMin * 60000;
+    episodes(state, 'vitals').forEach(({ e, ctas }) => {
+      const iv = s.ctasIntervals[ctas];
+      if (!(iv > 0)) return;
+      const times = [U.toMs(e.startTime), ...(e.reassessments || []).map(U.toMs)].sort((x, y) => x - y);
+      const stop = e.endTime ? U.toMs(e.endTime) : now;
+      times.forEach((t, i) => {
+        const d = t + iv * 60000;
+        if (d > stop || !inWin(d)) return; // same rule as D.metrics: only intervals that fell due during the episode
+        due++; if (i + 1 < times.length && times[i + 1] <= d + grace) onTime++;
+      });
+    });
+    const kpi = a => ({ n: a.length, mean: U.round(U.mean(a)), median: U.round(U.median(a)) });
+    return {
+      registered: all.filter(p => inWin(U.toMs(p.createdAt))).length,
+      released: released.length, releasedOverstay: released.filter(p => p.release.boardingMin != null && p.release.boardingMin >= s.boardingRedMin).length,
+      exited: exited.length, lwbs, lwbsPct: exited.length ? Math.round(lwbs / exited.length * 100) : 0,
+      byExit: Object.keys(byExit).sort((a, b) => byExit[b] - byExit[a]).map(k => ({ label: k, n: byExit[k] })),
+      bedAlloc: kpi(alloc), bedPlace: kpi(place), procTat: kpi(tat),
+      compliance: { n: due, pct: due ? U.round((onTime / due) * 100) : null },
+    };
+  };
+
+  /** Period the handoff summarises. In the first hour after a changeover the outgoing shift is the one being handed over. */
+  D.handoffWindow = (shifts, now, offsetMin) => {
+    const cur = D.shiftAt(shifts, now, offsetMin);
+    if (now - cur.from >= 3600000) return { from: cur.from, to: now, title: `${D.shiftTitle(cur)}, so far` };
+    const prev = D.shiftAt(shifts, cur.from - 1, offsetMin);
+    return { from: prev.from, to: now, title: `${D.shiftTitle(prev)}, and since` };
+  };
+
+  /** Individuals (XmR) control limits. Signals: a point outside the limits, or 8 consecutive points on one side of the mean. */
+  D.xmr = values => {
+    const pts = values.map((v, i) => [i, v]).filter(x => x[1] != null);
+    if (pts.length < 6) return { enough: false, n: pts.length };
+    const xs = pts.map(x => x[1]);
+    const mean = U.mean(xs);
+    const mrs = xs.slice(1).map((x, i) => Math.abs(x - xs[i]));
+    const mr = U.mean(mrs) || 0;
+    const ucl = mean + 2.66 * mr, lcl = Math.max(0, mean - 2.66 * mr);
+    const outside = pts.filter(x => x[1] > ucl + 1e-9 || x[1] < lcl - 1e-9).map(x => x[0]);
+    let run = 0, side = 0, shift = false;
+    xs.forEach(x => { const sd = x > mean ? 1 : x < mean ? -1 : 0; if (sd && sd === side) run++; else { side = sd; run = sd ? 1 : 0; } if (run >= 8) shift = true; });
+    return { enough: true, n: pts.length, mean, ucl, lcl, outside, shift, signal: outside.length > 0 || shift };
+  };
+
+  // ------------------------------------------------------------------ handoff (SBAR) — built from live data only
+
+  D.sbar = (state, s, now, opts = {}) => {
+    const show = p => (opts.privacy ? `${p.urn} (${U.initials(p.name)})` : `${p.urn} ${p.name}`);
+    const act = D.activePatients(state);
+    const vit = act.filter(p => p.workflows.vitals.active);
+    const bed = act.filter(p => p.workflows.bed.active);
+    const proc = act.filter(p => p.workflows.procedure.active);
+    const overdue = vit.filter(p => D.vitalsTiming(p, s, now).state === 'overdue').sort(D.byVitalsUrgency(s, now));
+    const ctas1 = act.filter(p => p.ctas === 'CTAS 1');
+    const ctasMix = D.CTAS.map(c => [c, act.filter(p => p.ctas === c).length]).filter(x => x[1]).map(x => `${x[0]}: ${x[1]}`).join(', ') || 'none';
+    const longBed = bed.map(p => [p, D.bedWait(p, s, now)]).filter(x => x[1].level !== 'ok').sort((a, b) => b[1].mins - a[1].mins);
+    const unalloc = bed.filter(p => !p.workflows.bed.bedAllocated);
+    const notReady = proc.filter(p => !D.procReadiness(p.workflows.procedure).ready);
+    const noWf = act.filter(p => !D.activeWfs(p).length);
+    const m = D.metrics(state, s, now);
+    const since = opts.window ? opts.window.from : now - 12 * 3600000, until = opts.window ? opts.window.to : Infinity;
+    const exited = Object.values(state.patients).filter(p => p.exit && U.toMs(p.exit.time) >= since && U.toMs(p.exit.time) < until);
+    const ed = D.inEdPatients(state), boardingNow = ed.filter(p => p.ed.decision).sort((x, y) => D.boarding(y, s, now).mins - D.boarding(x, s, now).mins);
+    const over = boardingNow.filter(p => D.boarding(p, s, now).overstay);
+    const placed = exited.filter(p => p.exit.type === 'placed').length;
+    const lwbs = exited.filter(p => p.exit.type === 'lwbs' || p.exit.type === 'dama').length;
+    const L = [];
+    L.push(`=== PULSE-ED SHIFT HANDOFF (SBAR) — ${s.siteName} ===`);
+    L.push(`Generated: ${U.full(now)} by ${opts.user || '—'}${opts.demo ? '   [TRAINING / DEMO DATA]' : ''}`, '');
+    L.push('[S] SITUATION');
+    L.push(`- Active waiting-area patients: ${act.length} (${ctasMix})`);
+    L.push(`- Vitals monitoring: ${vit.length} | Awaiting ED bed: ${bed.length} (${unalloc.length} unallocated) | Awaiting procedure: ${proc.length}`);
+    L.push(`- OVERDUE reassessments: ${overdue.length}`);
+    overdue.forEach(p => L.push(`    • ${show(p)} ${p.ctas} — ${D.vitalsTiming(p, s, now).label}`));
+    if (ctas1.length) { L.push(`- CTAS 1 IN WAITING AREA: ${ctas1.length}`); ctas1.forEach(p => L.push(`    • ${show(p)} — ${p.diagnosis}`)); }
+    const fb = D.frontBoard(state, s), frontOver = act.filter(p => (D.frontTiming(p, s, now) || {}).over);
+    L.push(`- Front areas: Screening holding ${fb.screening.length}/${s.screeningCapacity} | Triage ${fb.triage.filter(x => x.p).length}/${fb.triage.length} | Reassessment ${fb.reassess.filter(x => x.p).length}/${fb.reassess.length} | OVER TIME LIMIT: ${frontOver.length}`);
+    frontOver.forEach(p => { const f = D.frontTiming(p, s, now); L.push(`    • ${D.frontText(p.front)}: ${show(p)} — ${U.dur(f.mins)} (limit ${f.max} min)`); });
+    L.push(`- On ED beds: ${ed.length} | Admitted / referred (boarding): ${boardingNow.length} | OVERSTAY (over ${U.dur(s.boardingRedMin)}): ${over.length}`);
+    boardingNow.forEach(p => { const b = D.boarding(p, s, now), d = p.ed.decision; L.push(`    • ${p.ed.bed}: ${show(p)} — ${D.DECISIONS[d.type]} ${d.specialty}${d.unit ? ' / ' + d.unit : ''}, boarding ${U.dur(b.mins)}${b.overstay ? ' (OVERSTAY)' : ''}`); });
+    L.push('', `[B] BACKGROUND (${opts.window ? opts.window.title : 'last 12 h'})`);
+    L.push(`- Exited waiting area: ${exited.length} (placed on ED bed: ${placed}, LWBS/AMA: ${lwbs})`);
+    L.push(`- Last 24 h: bed allocation median ${m.bedAlloc.median ?? '—'} min (n=${m.bedAlloc.n}); placement median ${m.bedPlace.median ?? '—'} min (n=${m.bedPlace.n}); procedure TAT median ${m.procTat.median ?? '—'} min (n=${m.procTat.n}); reassessment compliance ${m.compliance.pct ?? '—'}% (n=${m.compliance.n}).`);
+    L.push('', '[A] ASSESSMENT');
+    L.push(`- Bed waits over ${s.bedWaitAmberMin} min: ${longBed.length}`);
+    longBed.slice(0, 10).forEach(([p, w]) => L.push(`    • ${show(p)} — waiting ${U.dur(w.mins)} for ${p.workflows.bed.intendedSpecialty}${p.workflows.bed.bedAllocated ? ` (allocated ${p.workflows.bed.allocatedBed})` : ' (UNALLOCATED)'}`));
+    L.push(`- Procedures not ready: ${notReady.length}`);
+    notReady.forEach(p => L.push(`    • ${show(p)} — ${p.workflows.procedure.plannedProcedure}: ${D.procReadiness(p.workflows.procedure).issues.join(', ')}`));
+    if (noWf.length) { L.push(`- On board with NO active workflow (need disposition): ${noWf.length}`); noWf.forEach(p => L.push(`    • ${show(p)}`)); }
+    L.push('', '[R] RECOMMENDATION');
+    let n = 1;
+    if (ctas1.length) L.push(`${n++}. Move CTAS 1 patient(s) to resuscitation now; escalate to the ED physician in charge.`);
+    if (overdue.length) L.push(`${n++}. Reassess the ${overdue.length} overdue patient(s) first, longest overdue at top.`);
+    if (frontOver.length) L.push(`${n++}. Move on the ${frontOver.length} patient(s) over the time limit in screening / triage / reassessment.`);
+    if (over.length) L.push(`${n++}. Escalate the ${over.length} overstay boarding patient(s) for transfer to ward / ICU: ${over.map(p => p.ed.bed).join(', ')}.`);
+    if (longBed.length) L.push(`${n++}. Escalate the ${longBed.length} prolonged bed wait(s) to the bed coordinator / inpatient teams.`);
+    if (notReady.length) L.push(`${n++}. Resolve consent / arrangement for ${notReady.length} procedure(s).`);
+    if (noWf.length) L.push(`${n++}. Record a disposition for patients with no active workflow.`);
+    if (n === 1) L.push('1. No outstanding safety actions. Continue routine reassessment schedule.');
+    if (opts.notes) L.push('', '[NOTES FROM OUTGOING NURSE]', opts.notes);
+    L.push('', '=== END OF REPORT ===');
+    return L.join('\n');
+  };
+})(window.PulseED);
