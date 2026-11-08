@@ -2,7 +2,7 @@
  * apiUrl = the contract's own Apps Script web app (PulseED Adult ED Register), never the PatientFlow MS product register.
  * Leave apiUrl empty for local / training use (data stays in this browser). */
 window.PULSEED_SITE = {
-  backend: { mode: 'google', apiUrl: '' },
+  backend: { mode: 'google', apiUrl: 'https://script.google.com/macros/s/AKfycbyZGubGp9lPQ0ONOW6lE1RJxEDrfUX8REqOJXEkkrfmL7nYM93Z8IBN4lfxflB_UGpWJw/exec' },
   forceLive: false,
 };
 // ?training opens Training / Demo mode: synthetic patients kept in this browser only, never the live register.
