@@ -545,7 +545,7 @@
   const opt = (v, cur, label) => `<option value="${esc(v)}"${v === cur ? ' selected' : ''}>${esc(label || v)}</option>`;
   const sel = (name, options, cur, attrs = '') => `<select name="${name}" ${attrs}>${options.map(o => (Array.isArray(o) ? opt(o[0], cur, o[1]) : opt(o, cur))).join('')}</select>`;
   const inp = (name, val = '', attrs = '') => `<input name="${name}" value="${esc(val)}" ${attrs}>`;
-  const patientCard = p => `<div class="pcard"><div><b>${nm(p)}</b> <span class="mono tsky">${esc(p.urn)}</span> ${ctasB(p.ctas)}</div><div class="hint">${esc(p.diagnosis)} · ${esc(p.physician)} · ${esc(p.team)} · Enc ${esc(p.encounterId)}</div></div>`;
+  const patientCard = p => `<div class="pcard"><div><b>${nm(p)}</b> <span class="mono tsky">${esc(p.urn)}</span> ${ctasB(p.ctas)}</div><div class="hint">${[p.diagnosis, p.physician, p.team, p.encounterId ? 'Enc ' + p.encounterId : ''].filter(x => x && x !== 'Unassigned').map(esc).join(' · ')}</div></div>`;
   const fresh = id => S.state.patients[id];
 
   /** Run a store action and report the result. */
