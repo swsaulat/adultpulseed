@@ -687,7 +687,7 @@
     UI.modal({
       title: reason === 'locked' ? 'Station locked' : 'Sign in to this station', icon: 'lock', locked: true, submit: 'Sign in',
       body: `${reason === 'locked' ? '<p class="note">The station locked after inactivity to protect patient information.</p>' : ''}
-        ${(window.PULSEED_SITE || {}).training ? `<p class="note">${ic('shield')} <b>Training version</b>: open to anyone, no account needed. Type any name and pick a role to see what that person sees: <b>Nurse</b> for the station workflows, <b>ED Leader</b> or <b>Admin</b> to also see analytics, the audit trail and exports. Patients here are synthetic and stay in this browser. <a class="link" href="quick-guide.html" target="_blank" rel="noopener">Quick guide</a></p>`
+        ${(window.PULSEED_SITE || {}).training ? `<p class="note">${ic('shield')}<span><b>Training version</b>: open to anyone, no account needed. Type any name and pick a role to see what that person sees: <b>Nurse</b> for the station workflows, <b>ED Leader</b> or <b>Admin</b> to also see analytics, the audit trail and exports. Patients here are synthetic and stay in this browser. <a class="link" href="quick-guide.html" target="_blank" rel="noopener">Quick guide</a></span></p>`
           : `<p class="hint">Every action is recorded in the audit trail under this name and role.${S.adapter && S.adapter.kind === 'local' ? ' In local mode this is self-declared, not a verified login — connect PatientFlow MS for real authentication.' : ''}</p>`}
         ${field('Your name (as on your badge)', inp('name', S.user ? S.user.name : recent[0] || '', 'required autocomplete="off" list="dl-names" autofocus maxlength="60"'))}
         ${field('Role', sel('role', PE.ROLES, S.user ? S.user.role : 'Nurse'))}
