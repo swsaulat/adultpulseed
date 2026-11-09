@@ -318,6 +318,10 @@
         const card = (title, count, sub, icon, tone, view, extra = '') => `
           <button class="metric ${tone} ${extra}" data-act="nav" data-id="${view}">
             <div><p>${title}</p><h4>${count}</h4><small>${sub}</small></div><span class="mi">${ic(icon)}</span></button>`;
+        // Dashboard numbers are grouped into four labelled boxes so staff read them by purpose, not as 16 loose cards.
+        const tile = (title, count, sub, tone, view) => `<button class="mtile ${tone}" data-act="nav" data-id="${view}"><span class="mt">${title}</span><b>${count}</b><small>${sub}</small></button>`;
+        const group = (title, icon, tone, tag, tiles) => `<div class="mgroup ${tone}"><div class="mgh">${ic(icon)}<h3>${title}</h3><span class="mtag">${tag}</span></div><div class="mtiles n${tiles.length}">${tiles.join("")}</div></div>`;
+        const urgent = L.ctas1.length + L.overdue.length + L.frontOver.length + L.overstay.length;
         const vitRows = L.vit.slice(0, 6).map(p => {
           const tm = D.vitalsTiming(p, s, t), v = p.workflows.vitals;
           return `<tr class="${tm.state === 'overdue' || tm.state === 'continuous' ? 'row-red' : ''}"><td>${urnLink(p)}</td><td>${ctasB(p.ctas)}</td><td class="mono">${v.lastReassessment ? U.when(v.lastReassessment) : 'Initial'}</td><td class="r">${timingB(tm)}</td><td class="r">${btn('reassess', p.id, 'Record', 'ghost', 'check')}</td></tr>`;
@@ -341,29 +345,31 @@
               <button class="btn sm ${L.overstay.length ? 'red' : 'ghost'}" data-act="nav" data-id="edbeds">${ic('bed')}ED Beds (${L.ed.length})</button>
             </div>
           </section>
-          <section class="metrics">
-            ${card('Active Vitals Monitoring', L.vit.length, 'Waiting-area reassessment schedule', 'heart', 'sky', 'vitals')}
-            ${card('Patients Awaiting ED Bed', L.bed.length, `<span class="tamber">${unalloc} waiting to be allocated</span>`, 'bed', 'amber', 'bed')}
-            ${card('Active Awaiting Procedure', L.proc.length, notReady.length ? `<span class="tred">${notReady.length} not ready (consent / arrangement)</span>` : 'Preparation &amp; readiness', 'syringe', 'blue', 'procedure')}
-            ${card('Overdue Reassessments', L.overdue.length, `${L.dueSoon.length} due soon`, 'alert', L.overdue.length ? 'red' : 'grey', 'vitals', L.overdue.length ? 'pulse-card-alert' : '')}
-          </section>
-          <section class="metrics small">
-            ${card('CTAS 1 in Waiting Area', L.ctas1.length, L.ctas1.length ? '<span class="tred">Requires resuscitation area</span>' : 'None', 'heart', L.ctas1.length ? 'red' : 'grey', 'patients', L.ctas1.length ? 'pulse-card-alert' : '')}
-            ${card('Longest Bed Wait', longest ? U.dur(longest.mins) : '—', longest ? `${esc(L.bed[0].urn)} · target &lt; ${s.bedWaitAmberMin}m` : 'No one waiting', 'clock', longest && longest.level !== 'ok' ? (longest.level === 'red' ? 'red' : 'amber') : 'grey', 'bed')}
-            ${card('Due Soon', L.dueSoon.length, 'Within the due-soon window', 'clock', L.dueSoon.length ? 'amber' : 'grey', 'vitals')}
-            ${card('Needs Disposition', L.noWf.length, L.noWf.length ? '<span class="tamber">No active workflow — record exit</span>' : 'All patients have a workflow', 'door', L.noWf.length ? 'amber' : 'grey', 'patients')}
-          </section>
-          <section class="metrics small">
-            ${card('Screening Unit Holding', `${fb.screening.length} / ${s.screeningCapacity}`, `Max ${s.screeningMaxMin} min each`, 'users', fb.screening.length >= s.screeningCapacity ? 'amber' : 'sky', 'front')}
-            ${card('Adult Triage Beds', `${fb.triage.filter(x => x.p).length} / ${fb.triage.length}`, `Max ${s.triageMaxMin} min each`, 'clip', 'sky', 'front')}
-            ${card('Reassessment Beds', `${fb.reassess.filter(x => x.p).length} / ${fb.reassess.length}`, `Max ${s.reassessMaxMin} min each`, 'heart', 'sky', 'front')}
-            ${card('Over Time Limit (front areas)', L.frontOver.length, L.frontOver.length ? '<span class="tred">Move on to waiting area or ED bed</span>' : 'None', 'alert', L.frontOver.length ? 'red' : 'grey', 'front', L.frontOver.length ? 'pulse-card-alert' : '')}
-          </section>
-          <section class="metrics small">
-            ${card('Patients on ED Beds', L.ed.length, `${beds.occupied} of ${beds.listed} listed beds occupied`, 'bed', 'sky', 'edbeds')}
-            ${card('Empty ED Beds', beds.empty, beds.reserved ? `${beds.reserved} more reserved for waiting patients` : 'Ready for new patients', 'bed', beds.empty ? 'green' : 'amber', 'edbeds')}
-            ${card('Admitted / Referred (Boarding)', L.boarding.length, 'Waiting for ward / ICU on an ED bed', 'clock', L.boarding.length ? 'amber' : 'grey', 'edbeds')}
-            ${card(`Boarding Overstay (over ${U.dur(s.boardingRedMin)})`, L.overstay.length, L.overstay.length ? '<span class="tred">Charge nurse: escalate transfer</span>' : 'None', 'alert', L.overstay.length ? 'red' : 'grey', 'edbeds', L.overstay.length ? 'pulse-card-alert' : '')}
+          <section class="mgroups">
+            ${group('Needs action now', 'alert', urgent ? 'red' : 'green', urgent ? `${urgent} to act on` : 'All clear', [
+              tile('CTAS 1 in waiting area', L.ctas1.length, L.ctas1.length ? 'Move to resuscitation' : 'None', L.ctas1.length ? 'red pulse-card-alert' : 'ok', 'patients'),
+              tile('Overdue reassessments', L.overdue.length, `${L.dueSoon.length} due soon`, L.overdue.length ? 'red pulse-card-alert' : 'ok', 'vitals'),
+              tile('Over time: screening / triage / reassessment', L.frontOver.length, L.frontOver.length ? 'Move them on' : 'None', L.frontOver.length ? 'red pulse-card-alert' : 'ok', 'front'),
+              tile(`Boarding over ${U.dur(s.boardingRedMin)}`, L.overstay.length, L.overstay.length ? 'Escalate transfer' : 'None', L.overstay.length ? 'red pulse-card-alert' : 'ok', 'edbeds'),
+            ])}
+            ${group('Waiting area', 'users', 'sky', `${L.a.length} active patients`, [
+              tile('Vitals monitoring', L.vit.length, 'Reassessment schedule', 'sky', 'vitals'),
+              tile('Awaiting ED bed', L.bed.length, unalloc ? `<span class="tamber">${unalloc} not allocated</span>` : 'All allocated', 'amber', 'bed'),
+              tile('Awaiting procedure', L.proc.length, notReady.length ? `<span class="tred">${notReady.length} not ready</span>` : 'Ready / on track', 'blue', 'procedure'),
+              tile('Longest bed wait', longest ? U.dur(longest.mins) : '—', longest ? `target &lt; ${s.bedWaitAmberMin}m` : 'No one waiting', longest && longest.level !== 'ok' ? (longest.level === 'red' ? 'red' : 'amber') : 'grey', 'bed'),
+              tile('Due soon', L.dueSoon.length, 'Reassessments', L.dueSoon.length ? 'amber' : 'grey', 'vitals'),
+              tile('Needs disposition', L.noWf.length, L.noWf.length ? '<span class="tamber">Record exit</span>' : 'None', L.noWf.length ? 'amber' : 'grey', 'patients'),
+            ])}
+            ${group('Screening, Triage & Reassessment', 'clip', 'sky', 'Short stops, not ED beds', [
+              tile('Screening holding', `${fb.screening.length}/${s.screeningCapacity}`, `Max ${s.screeningMaxMin} min`, fb.screening.length >= s.screeningCapacity ? 'amber' : 'sky', 'front'),
+              tile('Triage beds', `${fb.triage.filter(x => x.p).length}/${fb.triage.length}`, `Max ${s.triageMaxMin} min`, 'sky', 'front'),
+              tile('Reassessment beds', `${fb.reassess.filter(x => x.p).length}/${fb.reassess.length}`, `Max ${s.reassessMaxMin} min`, 'sky', 'front'),
+            ])}
+            ${group('ED Beds', 'bed', 'green', `${beds.occupied} of ${beds.listed} occupied`, [
+              tile('Patients on ED beds', L.ed.length, 'Until released', 'sky', 'edbeds'),
+              tile('Empty beds', beds.empty, beds.reserved ? `${beds.reserved} more reserved` : 'Ready for patients', beds.empty ? 'green' : 'amber', 'edbeds'),
+              tile('Admitted / referred', L.boarding.length, 'Boarding, waiting for ward / ICU', L.boarding.length ? 'amber' : 'grey', 'edbeds'),
+            ])}
           </section>
           ${shiftPanel(t)}
           <section class="tri">
