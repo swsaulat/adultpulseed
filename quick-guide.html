@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PulseED Quick Guide</title>
+<title>PulseED Reassessment Area · Quick Guide</title>
 <style>
   :root { --ink: #14202e; --muted: #5a6878; --line: #d8dee6; --bg: #ffffff; --accent: #0b6e99; --red: #b42318; --amber: #b54708; --green: #067647; }
   * { box-sizing: border-box; }
@@ -33,102 +33,69 @@
 <body>
 <div class="page">
   <header>
-    <div><h1>PulseED · Quick Guide</h1><p>ED Reassessment &amp; Flow Station: keep one copy at every station</p></div>
+    <div><h1>PulseED · Quick Guide</h1><p>Reassessment Area Management System: keep one copy at the station</p></div>
     <p class="links">Live: <b>adultpulseed.patientflowms.com</b><br>Training: <b>adultpulseed.patientflowms.com/?training</b></p>
   </header>
 
   <div class="grid">
     <section>
       <h2>1 · Sign in</h2>
-      <ol>
-        <li>Open <b>adultpulseed.patientflowms.com</b>.</li>
-        <li>Click <b>Continue with Google</b> and pick <b>your own</b> account. Never share a login: every action is recorded under your name.</li>
-        <li>The station locks after <b>15 min</b> idle. Sign in again; nothing is lost.</li>
-      </ol>
-      <p>"Not on the staff list"? Ask the charge nurse to have you added.</p>
-      <p>Practise any time: the <b>Training version</b> link at the bottom of the left menu (or adultpulseed.patientflowms.com/?training) opens a safe copy with synthetic patients. No account needed.</p>
-    </section>
-
-    <section>
-      <h2>2 · Admit a patient</h2>
-      <ol>
-        <li>Click <b>+ New Patient Entry</b>.</li>
-        <li>Copy <b>URN / MRN</b> exactly from the EHR. Add name, complaint, <b>CTAS</b> and team.</li>
-        <li>Tick one or more workflows: <b>Vitals</b>, <b>Awaiting ED Bed</b> (needs intended specialty), <b>Awaiting Procedure</b>.</li>
-      </ol>
-      <p>A URN that is already active is blocked, so check <b>All Patients</b> first.</p>
-    </section>
-
-    <section>
-      <h2>3 · Reassessments (Vitals)</h2>
-      <table>
-        <tr><th>CTAS</th><th>Reassess every</th></tr>
-        <tr><td>CTAS 1</td><td>Continuous observation</td></tr>
-        <tr><td>CTAS 2</td><td>15 min</td></tr>
-        <tr><td>CTAS 3</td><td>30 min</td></tr>
-        <tr><td>CTAS 4</td><td>60 min</td></tr>
-        <tr><td>CTAS 5</td><td>120 min</td></tr>
-      </table>
-      <p>Record each one with <b>Record Reassessment</b>. Colours: <span class="amber">amber = due soon</span>, <span class="red">red = overdue</span> (chime repeats every 2 min). Overdue is logged automatically.</p>
-    </section>
-
-    <section>
-      <h2>4 · Beds &amp; procedures</h2>
       <ul>
-        <li><b>Awaiting ED Bed</b>: allocate a bed when one is assigned. A bed held by another patient is blocked unless you confirm an override.</li>
-        <li>Releasing a bed needs a reason.</li>
-        <li><b>Awaiting Procedure</b>: update status: Awaiting → Ready → In Progress → Done (or Deferred / Cancelled), plus consent and arranged.</li>
-        <li>Waits turn <span class="amber">amber at 60 min</span> and <span class="red">red at 120 min</span>.</li>
+        <li>Open <b>adultpulseed.patientflowms.com</b> and click <b>Continue with Google</b> with your own account.</li>
+        <li>The station locks after 15 min idle. Sign in again; nothing is lost.</li>
+        <li>Not on the staff list? Ask the charge nurse.</li>
       </ul>
     </section>
-
     <section>
-      <h2>5 · Exit (Global Exit Rule)</h2>
-      <p>When the patient leaves the waiting area, click <b>Record exit</b> (or <b>Place &amp; Exit</b> on the bed list) and choose how:</p>
+      <h2>2 · Add a patient</h2>
       <ul>
-        <li>Placed on ED bed: enter the actual bed.</li>
-        <li>Sent directly to ward / unit · Discharged · LWBS.</li>
-        <li>Left against advice · Transferred · Deceased · Entered in error: <b>reason required</b>.</li>
-      </ul>
-      <p>Exit closes <b>every</b> open waiting-area workflow for that patient. Reopening someone else's exit (or after 10 min) needs a Charge Nurse.</p>
-    </section>
-
-    <section>
-      <h2>5b · ED Beds &amp; Boarding</h2>
-      <ul>
-        <li>"Placed on ED bed" moves the patient to <b>ED Beds &amp; Boarding</b>: the bed shows <b>occupied</b> until the patient is released.</li>
-        <li>Open the bed to <b>change the physician</b>, <b>Admit / refer</b> (specialty and ward / ICU), or <b>Move bed</b>.</li>
-        <li>The admission / referral decision starts the <b>boarding clock</b>: amber at 3 h, <b>red overstay alarm at 4 h</b>. Charge nurse escalates the transfer.</li>
-        <li><b>Release from ED</b> needs where the patient went and a <b>release note</b>. The bed becomes <b>empty</b> straight away and the record closes.</li>
+        <li>Click <b>+ Add Patient</b>. Copy the <b>MRN</b> from TrakCare, add name, chief complaint and CTAS.</li>
+        <li>Tick what the patient is waiting for: <b>Vital Signs</b>, <b>Bed</b>, <b>Procedure / Treatment / Imaging</b> (one or more).</li>
+        <li>Bed: enter the physician who booked it. The booking time is recorded for you.</li>
       </ul>
     </section>
-
     <section>
-      <h2>6 · Charge nurses &amp; leaders</h2>
+      <h2>3 · Vital signs</h2>
+      <table><tr><th>CTAS</th><th>Every</th></tr><tr><td>1</td><td>Continuous</td></tr><tr><td>2</td><td>15 min</td></tr><tr><td>3</td><td>30 min</td></tr><tr><td>4</td><td>60 min</td></tr><tr><td>5</td><td>120 min</td></tr></table>
+      <p>Take them, document in TrakCare as usual, then press <b>Done</b>. Amber = due soon, red = overdue (chimes).</p>
+    </section>
+    <section>
+      <h2>4 · Bed and procedure / imaging</h2>
       <ul>
-        <li><b>Shift Handoff (SBAR)</b>: live summary for handover.</li>
-        <li><b>Admin &amp; SPC Analytics</b>: compliance (target 90%), waits, trends.</li>
-        <li><b>Event Audit Trail</b>: who did what, when. Exports are logged too.</li>
-        <li>Shift report email with one PDF arrives at <b>06:00, 14:00 and 22:00</b> (doctors' shifts).</li>
-        <li>On the Main Dashboard, switch the shift view: <b>Doctors · 8 h</b> or <b>Nursing · 12 h</b> (07:00–19:00, 19:00–07:00).</li>
-        <li><b>Settings</b> (Charge Nurse / ED Leader / Admin): intervals, beds, lists.</li>
-        <li><b>Handover PDF</b> (Main Dashboard, shift panel): Charge Nurses for each 12-hour shift; Physician TLs for each 8-hour shift; ED Leaders and Admins for both. Print it for handover.</li>
-        <li>Analytics and the audit trail appear only for Charge Nurses, ED Leaders and Admins. Excel exports and the Google Sheet are for ED Leaders and Admins only.</li>
+        <li><b>Waiting for Bed</b> shows who booked each bed, when, and how long the patient has waited.</li>
+        <li>When the bed is given, press <b>Assign bed</b> and type the bed. The patient leaves PulseED.</li>
+        <li>Procedure / treatment / imaging: set <b>In Progress</b>, then <b>Done</b>.</li>
       </ul>
     </section>
-
+    <section>
+      <h2>5 · Patient leaving</h2>
+      <ul>
+        <li><b>Bed assigned</b>: the patient moved to an ED bed.</li>
+        <li><b>Discharged</b>: pick the reason (Discharged home, DAMA, Absconded, LWBS, Transferred) or type another.</li>
+        <li><b>Entered in error</b>: wrong patient or duplicate.</li>
+        <li>Everything open is closed at once. Mistake? <b>Undo</b> on the dashboard.</li>
+      </ul>
+    </section>
+    <section>
+      <h2>6 · Handover and reports</h2>
+      <ul>
+        <li><b>Shift Handover</b> builds the SBAR from the live list. Copy or print it.</li>
+        <li>A shift report (one PDF) is emailed automatically at 06:00, 14:00 and 22:00.</li>
+        <li>Charge nurses and leaders also see <b>Reports</b> and the <b>Audit Trail</b>.</li>
+      </ul>
+    </section>
     <section class="wide note">
       <h2>Training: practise before your first live shift</h2>
-      <p>Open <b>adultpulseed.patientflowms.com/?training</b>. It is full of synthetic patients and stays on that PC only; nothing reaches the live register. Use any name to sign in. Try each task once:</p>
+      <p>Open <b>adultpulseed.patientflowms.com/?training</b>. Made-up patients only, kept on that PC; nothing reaches the live register. Use any name to sign in. Try each task once:</p>
       <ol>
-        <li>Admit a CTAS 3 patient into Vitals + Awaiting ED Bed.</li>
-        <li>Record a reassessment, then find an overdue patient and reassess them.</li>
-        <li>Allocate a bed, then try to give the same bed to a second patient and read the warning.</li>
-        <li>Move a procedure from Awaiting to Done.</li>
-        <li>Exit a patient as "Placed on ED bed", then on ED Beds: change the physician, admit to a specialty, and release with a note. Check the bed turns empty.</li>
-        <li>Open Shift Handoff (SBAR) and the Event Audit Trail and find your own actions.</li>
+        <li>Add a CTAS 3 patient waiting for vital signs and a bed (booked by a physician).</li>
+        <li>Press <b>Done</b> for an overdue vital signs patient.</li>
+        <li>Move a procedure or imaging request to <b>Done</b>.</li>
+        <li>On <b>Waiting for Bed</b>, assign a bed and see it under “Beds assigned”.</li>
+        <li>Discharge a patient as <b>DAMA</b>, then undo it from the dashboard.</li>
+        <li>Open <b>Shift Handover</b> and the <b>Audit Trail</b> and find your own actions.</li>
       </ol>
-      <p><b>Never enter real patients in training.</b> The orange <b>TRAINING / DEMO MODE</b> bar shows you are in training.</p>
+      <p><b>Never enter real patients in training.</b> The orange <b>TRAINING</b> bar shows you are in training.</p>
     </section>
   </div>
 
