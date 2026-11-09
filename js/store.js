@@ -139,7 +139,7 @@
       if (r.unchanged) return false;
       const st = this.state;
       if (r.full) st.patients = {};
-      (r.patients || []).forEach(p => (st.patients[p.id] = p));
+      (r.patients || []).forEach(p => (st.patients[p.id] = D.upgradePatient(p)));
       if (r.ids) { const keep = new Set(r.ids); Object.keys(st.patients).forEach(id => { if (!keep.has(id)) delete st.patients[id]; }); }
       if (r.full) st.events = r.events || [];
       else { const have = new Set(st.events.map(e => e.id)); (r.events || []).forEach(e => { if (!have.has(e.id)) st.events.push(e); }); }

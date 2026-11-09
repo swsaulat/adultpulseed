@@ -1,13 +1,14 @@
-/* PulseED — default configuration. Every value here can be changed per site in Settings. */
+/* PulseED Reassessment Area Management System — default configuration. Every value here can be changed per site in Settings. */
 (function (PE) {
   'use strict';
 
-  PE.VERSION = '2.0.0';
+  PE.VERSION = '3.0.0';
+  PE.PRODUCT = 'PulseED Reassessment Area Management System';
 
   PE.DEFAULT_SETTINGS = {
-    schema: 2,
+    schema: 3,
     siteName: 'Emergency Department',
-    stationName: 'Waiting Area Station',
+    stationName: 'Reassessment Area',
 
     // Reassessment interval (minutes) per CTAS level, per CTAS guideline. 0 = continuous observation.
     ctasIntervals: { 'CTAS 1': 0, 'CTAS 2': 15, 'CTAS 3': 30, 'CTAS 4': 60, 'CTAS 5': 120 },
@@ -22,9 +23,6 @@
     bedWaitRedMin: 120,
     procWaitAmberMin: 60,
     procWaitRedMin: 120,
-    // Boarding = still on an ED bed after the admission / referral decision. Red = overstay alarm (4 h).
-    boardingAmberMin: 180,
-    boardingRedMin: 240,
 
     chimeRepeatMin: 2,
     autoLockMin: 15,
@@ -36,10 +34,11 @@
     physicians: [],
     specialties: ['Cardiology', 'Emergency Medicine', 'General Surgery', 'Internal Medicine', 'Neurology', 'Obstetrics & Gynaecology',
       'Orthopaedics', 'Paediatrics', 'Plastic Surgery / Minor Care', 'Psychiatry', 'Respiratory', 'Trauma Surgery', 'Urology'],
+    // Suggestions for Procedure / Treatment / Radiology Imaging requests; anything else can be typed.
     procedures: ['CT Head / Brain', 'CT Abdomen / Pelvis', 'CT Coronary Angiogram', 'CT Pulmonary Angiogram', 'Portable Chest X-Ray',
       'X-Ray Limb', 'Abdominal Ultrasound', 'FAST Ultrasound', 'MRI', 'ECG', 'Lumbar Puncture', 'Wound Repair / Suturing',
       'Tendon Repair & Suturing', 'Fracture Reduction', 'Procedural Sedation', 'IV Electrolyte Panel & Rehydration', 'Blood Transfusion'],
-    // Adult ED: the 49 beds of the ED Summary Report, as "Area / Bed". Area = the part before " / ".
+    // Suggestions when a bed is assigned (the 49 Adult ED beds); any other bed can be typed.
     beds: [
       'Trauma Bay / Bed 1 (Code Bed)', 'Trauma Bay / Bed 2', 'Trauma Bay / Bed 3', 'Trauma Bay / Bed 57 (NPR)', 'Trauma Bay / Bed 58 (NPR)',
       'Critical Care Unit / Bed 4', 'Critical Care Unit / Bed 5', 'Critical Care Unit / Bed 6', 'Critical Care Unit / Bed 7',
@@ -53,14 +52,6 @@
       'RAZ / Bed 35', 'RAZ / Bed 36', 'RAZ / Bed 37', 'RAZ / Bed 38',
       'CDU / Bed 79 (Isolation)', 'CDU / Bed 80 (Isolation)', 'CDU / Bed 81 (Isolation)', 'CDU / Bed 82 (Isolation)',
       'CDU / Bed 83 (Isolation)', 'CDU / Bed 84 (Isolation)', 'CDU / Bed 85 (Isolation)', 'CDU / Bed 86 (Isolation)'],
-
-    // Front areas: short stops before the waiting area or an ED bed. Not ED beds: they never appear on the ED Beds board.
-    screeningCapacity: 4,  // Screening Unit holding area: places, not named beds
-    screeningMaxMin: 15,
-    triageBeds: ['Triage Bed 1', 'Triage Bed 2', 'Triage Bed 3', 'Triage Bed 4'],
-    triageMaxMin: 10,
-    reassessBeds: ['Reassessment Bed 1', 'Reassessment Bed 2'],
-    reassessMaxMin: 15,
 
     // Shared multi-workstation backend. "local" keeps data in this browser only (single station / training).
     backend: { mode: 'local', supabaseUrl: '', supabaseAnonKey: '', facilityId: '' },

@@ -42,9 +42,9 @@
   function alerts() {
     if (!S.user && S.device.mode) { /* keep evaluating so the chime still sounds on a locked screen */ }
     const L = UI.lists();
-    // A new boarding overstay or front-area time-limit breach chimes once; overdue reassessments and CTAS 1 keep repeating until handled.
+    // A new long bed wait chimes once; overdue vital signs and CTAS 1 keep repeating until handled.
     const repeat = L.overdue.map(p => p.id).concat(L.ctas1.map(p => 'c1' + p.id));
-    const ids = new Set(repeat.concat(L.overstay.map(p => 'bo' + p.id), L.frontOver.map(p => 'fr' + p.id + p.front.since)));
+    const ids = new Set(repeat.concat(L.longBed.map(p => 'bw' + p.id)));
     const fresh = [...ids].some(id => !known.has(id));
     known = ids;
     const t = Date.now();
@@ -60,9 +60,6 @@
         const tm = D.vitalsTiming(p, S.settings, t);
         if (!S.state.events.some(e => e.id === `ovd-${p.id}-${tm.due}`)) S.dispatchSystem('SYSTEM_OVERDUE', { id: p.id });
       });
-    }
-    if (leader && L.overstay.length && !S.isShared()) {
-      L.overstay.forEach(p => { if (!S.state.events.some(e => e.id === `brd-${p.id}-${U.toMs(p.ed.decision.time)}`)) S.dispatchSystem('SYSTEM_BOARDING', { id: p.id }); });
     }
   }
   S.dispatchSystem = async (type, payload) => {
@@ -93,7 +90,7 @@
     // Training data is built around "now". If nobody has used it for 6 hours its clocks are stale (patients "29 h overdue"),
     // so it is rebuilt fresh; anyone actively practising keeps their own entries.
     const lastUse = mode === 'demo' ? Math.max(0, ...S.state.events.map(e => Date.parse(e.ts) || 0)) : 0;
-    const stale = mode === 'demo' && Object.keys(S.state.patients).length && Date.now() - lastUse > 6 * 3600000;
+    const stale = mode === 'demo' && Object.keys(S.state.patients).length && (Date.now() - lastUse > 6 * 3600000 || S.state.schema !== D.emptyState().schema); // old format after an upgrade: rebuild too
     if (mode === 'demo' && (!Object.keys(S.state.patients).length || stale)) {
       await S.adapter.replace(PE.demo.build(S.settings).state);
       await S.reload();
