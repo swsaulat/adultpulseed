@@ -388,3 +388,6 @@ button.btile { cursor: pointer; } button.btile:hover { border-color: #0284c7; }
 @media (max-width: 1100px) { .mgroups { grid-template-columns: 1fr; } }
 @media (max-width: 560px) { .mtiles.n4, .mtiles.n6, .mtiles.n3 { --cols: 2; } }
 .note > .ic:first-child { width: 15px; height: 15px; vertical-align: -3px; margin-right: 6px; }
+/* re-triaged / moved patient: highlighted where the list now shows them */
+@keyframes flash-row { 0%, 60% { background: color-mix(in srgb, var(--sky) 28%, transparent); box-shadow: inset 4px 0 0 var(--sky); } 100% { background: transparent; box-shadow: none; } }
+.flash, tr.flash > td { animation: flash-row 3.5s ease-out 1; }
