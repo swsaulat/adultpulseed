@@ -154,7 +154,7 @@
     // One slim line of alert chips. A chip opens its patient list as a drop-down over the page, so alerts never push the screen down.
     const A = [];
     const lst = (arr, f) => arr.slice(0, 15).map(f).join('') + (arr.length > 15 ? `<span class="amore">+${arr.length - 15} more</span>` : '');
-    if (L.ctas1.length) A.push({ k: 'ctas1', ic: 'alert', pulse: true, label: `CTAS 1 in waiting area: ${L.ctas1.length}`, note: 'Move to resuscitation / continuous observation now.',
+    if (L.ctas1.length) A.push({ k: 'ctas1', ic: 'alert', pulse: true, label: `CTAS 1 in waiting area: ${L.ctas1.length}`, note: 'Move now to a resus bed, or any free monitored ED bed if resus is full. Continuous observation.',
       list: lst(L.ctas1, p => `<button class="link" data-act="open" data-id="${esc(p.id)}">${esc(p.urn)}</button>`) });
     if (L.overdue.length) A.push({ k: 'overdue', ic: 'bell', label: `${L.overdue.length} overdue reassessment${L.overdue.length > 1 ? 's' : ''}`, note: 'Click a patient to record the reassessment.' + (!S.device.sound ? ' <span class="pill amber">sound muted</span>' : ''),
       list: lst(L.overdue, p => { const m = D.vitalsTiming(p, st(), now()).overdueMin; return `<button class="link" data-act="reassess" data-id="${esc(p.id)}">${esc(p.urn)} (${esc(m < 1 ? '<1m' : U.dur(m))})</button>`; }) });
@@ -227,6 +227,17 @@
     body.innerHTML = v.body();
     if (v.after) v.after();
     $('#main').scrollTop = y;
+    // After a re-triage the lists re-sort by urgency, so the patient can jump rows: scroll to them and highlight the row.
+    if (UI.flashId && Date.now() < UI.flashUntil) {
+      const hit = body.querySelector(`[data-id="${CSS.escape(UI.flashId)}"]`);
+      const row = hit && (hit.closest('tr, .bedtile, .tile, .spot, li') || hit);
+      if (row) { row.classList.add('flash'); row.scrollIntoView({ block: 'center', behavior: 'smooth' }); UI.flashId = null; }
+    }
+  };
+  /** Show a re-triaged patient where they now sit, even if a CTAS filter would hide them. */
+  UI.flashPatient = (id, ctas) => {
+    if (ctas && UI.vs.vctas && UI.vs.vctas !== ctas) { UI.vs.vctas = ''; $('#viewHead').innerHTML = VIEWS[UI.view].head(); }
+    UI.flashId = id; UI.flashUntil = Date.now() + 4000; UI.renderBody();
   };
   UI.refresh = () => { UI.renderChrome(); UI.renderBody(); UI.renderDatalists(); };
 
@@ -347,7 +358,7 @@
           </section>
           <section class="mgroups">
             ${group('Needs action now', 'alert', urgent ? 'red' : 'green', urgent ? `${urgent} to act on` : 'All clear', [
-              tile('CTAS 1 in waiting area', L.ctas1.length, L.ctas1.length ? 'Move to resuscitation' : 'None', L.ctas1.length ? 'red pulse-card-alert' : 'ok', 'patients'),
+              tile('CTAS 1 in waiting area', L.ctas1.length, L.ctas1.length ? 'Move to resus / monitored bed' : 'None', L.ctas1.length ? 'red pulse-card-alert' : 'ok', 'patients'),
               tile('Overdue reassessments', L.overdue.length, `${L.dueSoon.length} due soon`, L.overdue.length ? 'red pulse-card-alert' : 'ok', 'vitals'),
               tile('Over time: screening / triage / reassessment', L.frontOver.length, L.frontOver.length ? 'Move them on' : 'None', L.frontOver.length ? 'red pulse-card-alert' : 'ok', 'front'),
               tile(`Boarding over ${U.dur(s.boardingRedMin)}`, L.overstay.length, L.overstay.length ? 'Escalate transfer' : 'None', L.overstay.length ? 'red pulse-card-alert' : 'ok', 'edbeds'),
@@ -783,7 +794,7 @@
           urn: d.urn, encounterId: d.encounterId, name: d.name, diagnosis: d.diagnosis, ctas: d.ctas, physician: d.physician, team, frontArea: frontArea || '', frontSpot: frontSpot || '',
           workflows: { vitals: d.wfVitals, bed: d.wfBed, procedure: d.wfProc }, intendedSpecialty: d.intendedSpecialty, plannedProcedure: d.plannedProcedure, consent: d.consent, arranged: d.arranged,
         }, `Patient ${U.norm(d.urn).toUpperCase()} submitted into workflows.`);
-        if (res.patient && res.patient.ctas === 'CTAS 1') UI.toast('CTAS 1 — this patient needs the resuscitation area now, not the waiting room.', 'error');
+        if (res.patient && res.patient.ctas === 'CTAS 1') UI.toast('CTAS 1: move now to a resus bed, or any free monitored ED bed if resus is full. Not the waiting room.', 'error');
       },
     });
   };
@@ -838,9 +849,10 @@
       body: `${patientCard(p)}${edCard(p, t)}
         <div class="g3">
           ${field('Treating Physician', inp('physician', p.physician === 'Unassigned' ? '' : p.physician, 'list="dl-phys" maxlength="60" placeholder="Unassigned"'), 'Pick from the list or type a new name; every change is in the audit trail.')}
+          ${field('CTAS (re-triage)', sel('ctas', D.CTAS, p.ctas), 'Upgrade if the patient deteriorates, downgrade if improving. Use Move bed for a monitored / resus bed.')}
           ${field('ED Team', inp('team', p.team, 'maxlength="40" required'))}
-          ${field('Diagnosis', inp('diagnosis', p.diagnosis, 'maxlength="120" required'))}
-          ${field('Change note', inp('note', '', 'maxlength="200" placeholder="Optional, e.g. handed over to Dr X"'), '', 'span2')}
+          ${field('Diagnosis', inp('diagnosis', p.diagnosis, 'maxlength="120" required'), '', 'span2')}
+          ${field('Change note', inp('note', '', 'maxlength="200" placeholder="Optional, e.g. deteriorated, handed over to Dr X"'), '', 'span2')}
         </div>
         <div class="row"><button type="button" class="btn ghost sm" data-do="undo">${ic('undo')}Undo placement (back to waiting area)</button></div>
         <h4 class="sh">Timeline (${evs.length})</h4>
@@ -850,7 +862,9 @@
         m.close(); ({ decision: UI.edDecisionModal, move: UI.edMoveModal, release: UI.edReleaseModal, undo: UI.reopenModal })[go.dataset.do](id);
       }),
       onSubmit: async (f, d) => {
-        await run('UPDATE_DETAILS', { id, expectedVersion: p.version, note: d.note, changes: { physician: d.physician, team: d.team, diagnosis: d.diagnosis } }, `Details updated for ${p.urn} on ${p.ed.bed}.`);
+        await run('UPDATE_DETAILS', { id, expectedVersion: p.version, note: d.note, changes: { physician: d.physician, ctas: d.ctas, team: d.team, diagnosis: d.diagnosis } },
+          d.ctas !== p.ctas ? `${p.urn} on ${p.ed.bed} re-triaged ${p.ctas} → ${d.ctas}.` : `Details updated for ${p.urn} on ${p.ed.bed}.`);
+        if (d.ctas !== p.ctas) UI.flashPatient(id, d.ctas);
       },
     });
   };
@@ -1073,7 +1087,9 @@
         });
       },
       onSubmit: async (f, d) => {
-        await run('UPDATE_DETAILS', { id, expectedVersion: p.version, note: d.note, changes: { name: d.name, ctas: d.ctas, encounterId: d.encounterId, diagnosis: d.diagnosis, physician: d.physician, team: d.team } }, `Details updated for ${p.urn}.`);
+        await run('UPDATE_DETAILS', { id, expectedVersion: p.version, note: d.note, changes: { name: d.name, ctas: d.ctas, encounterId: d.encounterId, diagnosis: d.diagnosis, physician: d.physician, team: d.team } },
+          d.ctas !== p.ctas ? `${p.urn} re-triaged ${p.ctas} → ${d.ctas}. The list re-sorts by urgency; the patient is highlighted.` : `Details updated for ${p.urn}.`);
+        if (d.ctas !== p.ctas) UI.flashPatient(id, d.ctas);
       },
     });
   };

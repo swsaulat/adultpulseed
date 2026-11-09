@@ -271,7 +271,7 @@
         ev(p, names.join(', '), 'Patient Registered', 'None', 'Active', `${p.name} · ${p.ctas} · ${p.team} · ${p.diagnosis}. Enrolled in: ${names.join(', ')}.`);
         D.activeWfs(p).forEach(k => ev(p, D.WF[k], 'Episode Started', 'None', 'Active',
           k === 'bed' ? `Intended specialty: ${specialty}` : k === 'procedure' ? `${proc.plannedProcedure} · consent ${proc.consent} · arranged ${proc.arranged}` : `Interval: ${intervalText(p.ctas, s)}`));
-        if (p.ctas === 'CTAS 1') ev(p, D.WF.vitals, 'Safety Alert', '', 'CTAS 1 in waiting area', 'CTAS 1 patients require immediate resuscitation-area care and continuous observation.');
+        if (p.ctas === 'CTAS 1') ev(p, D.WF.vitals, 'Safety Alert', '', 'CTAS 1 in waiting area', 'CTAS 1 patients need a resus bed, or any free monitored ED bed if resus is full, and continuous observation.');
         if (front) ev(p, 'Front Areas', 'Location Set', 'Arrival', D.frontText(front), `Maximum stay ${D.frontMax(s, front.area)} min.`);
         break;
       }
@@ -820,7 +820,7 @@
     if (noWf.length) { L.push(`- On board with NO active workflow (need disposition): ${noWf.length}`); noWf.forEach(p => L.push(`    • ${show(p)}`)); }
     L.push('', '[R] RECOMMENDATION');
     let n = 1;
-    if (ctas1.length) L.push(`${n++}. Move CTAS 1 patient(s) to resuscitation now; escalate to the ED physician in charge.`);
+    if (ctas1.length) L.push(`${n++}. Move CTAS 1 patient(s) now to a resus bed, or any free monitored ED bed if resus is full; escalate to the ED physician in charge.`);
     if (overdue.length) L.push(`${n++}. Reassess the ${overdue.length} overdue patient(s) first, longest overdue at top.`);
     if (frontOver.length) L.push(`${n++}. Move on the ${frontOver.length} patient(s) over the time limit in screening / triage / reassessment.`);
     if (over.length) L.push(`${n++}. Escalate the ${over.length} overstay boarding patient(s) for transfer to ward / ICU: ${over.map(p => p.ed.bed).join(', ')}.`);
