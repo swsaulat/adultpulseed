@@ -445,3 +445,36 @@ details.more { border: 1px dashed var(--line2); border-radius: 10px; padding: 8p
 details.more > summary { cursor: pointer; color: var(--muted); font-weight: 600; font-size: 12.5px; }
 details.more[open] > summary { margin-bottom: 8px; }
 @media (max-width: 640px) { .needpick { grid-template-columns: 1fr; } }
+
+/* ---- v3.1: CNR, several orders, two-step bed, typed notes ---- */
+.pill .ic { width: 12px; height: 12px; }
+.pill.big { font-size: 13px; padding: 5px 10px; }
+.cnrpill { vertical-align: 1px; }
+.nlist .nn small .pill { font-size: 10.5px; padding: 1px 6px; margin-right: 4px; }
+.cnrp { border-left: 4px solid var(--amber); }
+.cnrp .nlist { padding: 4px 0 0; }
+.cnrlist li.due { background: var(--amber-bg); box-shadow: inset 3px 0 0 var(--amber); }
+.cnrlist li .nn { white-space: normal; }
+.nlist .ord { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nlist .nn .ord + .ord { margin-top: 1px; }
+.nlist .nn small .ord { font-size: 11.5px; }
+.seg.big.two { margin: 10px 0 4px; }
+.seg.big.two span { padding: 10px 16px; font-size: 14px; display: inline-flex; align-items: center; gap: 6px; }
+.seg.big.two .ic { width: 16px; height: 16px; }
+.orders-in { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 6px; }
+.orow { display: grid; grid-template-columns: 170px 1fr auto; gap: 6px; align-items: center; }
+.orow .ibtn { width: 34px; height: 34px; }
+.orders { display: flex; flex-direction: column; gap: 6px; }
+.order { border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; background: var(--panel); display: flex; flex-direction: column; gap: 5px; }
+.order.closed { background: var(--panel2); opacity: .85; }
+.order .ot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.order .ot b { flex: 1; min-width: 140px; }
+.order .row { display: flex; gap: 6px; flex-wrap: wrap; }
+.ordl { font-size: 12.5px; margin: 2px 0; }
+.notelist { display: flex; flex-direction: column; gap: 4px; max-height: 210px; overflow-y: auto; }
+.nrow { display: grid; grid-template-columns: auto auto 1fr auto; gap: 10px; align-items: center; padding: 6px 9px; border-radius: 9px; background: var(--panel2); font-size: 12.5px; }
+.nrow small { color: var(--muted); }
+.note.warnn { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.note.warnn span { flex: 1; }
+.sh .btn { margin-left: 8px; vertical-align: 1px; }
+@media (max-width: 640px) { .orow { grid-template-columns: 1fr auto; } .orow select { grid-column: 1 / -1; } .nrow { grid-template-columns: 1fr; } }
