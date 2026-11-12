@@ -50,34 +50,44 @@
       <h2>2 · Add a patient</h2>
       <ul>
         <li>Click <b>+ Add Patient</b>. Copy the <b>MRN</b> from TrakCare, add name, chief complaint and CTAS.</li>
-        <li>Tick what the patient is waiting for: <b>Vital Signs</b>, <b>Bed</b>, <b>Procedure / Treatment / Imaging</b> (one or more).</li>
+        <li>Tick what the patient is waiting for: <b>Vital Signs</b>, <b>Bed</b>, <b>Procedure / Treatment / Imaging</b>. Tick all that apply.</li>
         <li>Bed: enter the physician who booked it. The booking time is recorded for you.</li>
+        <li>Several orders? Press <b>Add another</b>, e.g. CT + IV antibiotics + suturing. Each one gets its own status.</li>
       </ul>
     </section>
     <section>
       <h2>3 · Vital signs</h2>
       <table><tr><th>CTAS</th><th>Every</th></tr><tr><td>1</td><td>Continuous</td></tr><tr><td>2</td><td>15 min</td></tr><tr><td>3</td><td>30 min</td></tr><tr><td>4</td><td>60 min</td></tr><tr><td>5</td><td>120 min</td></tr></table>
       <p>Take them, document in TrakCare as usual, then press <b>Done</b>. Amber = due soon, red = overdue (chimes).</p>
+      <p><b>Patient not in the waiting area when called?</b> Press <b>CNR</b> (called, not around). The patient shows at the top of the dashboard; anyone can call again (a soft tone reminds after 10 min). Press <b>Found</b> when they are back.</p>
     </section>
     <section>
       <h2>4 · Bed and procedure / imaging</h2>
       <ul>
         <li><b>Waiting for Bed</b> shows who booked each bed, when, and how long the patient has waited.</li>
-        <li>When the bed is given, press <b>Assign bed</b> and type the bed. The patient leaves PulseED.</li>
-        <li>Procedure / treatment / imaging: set <b>In Progress</b>, then <b>Done</b>.</li>
+        <li><b>Step 1 · Assign bed</b>: type the bed (any free bed, e.g. any monitored bed if resus is full). The patient stays here as <b>bed assigned</b>.</li>
+        <li><b>Step 2 · Placed on bed</b>: when the patient is moved. The patient leaves PulseED. Anyone can do either step.</li>
+        <li>Each order: <b>Start</b>, then <b>Done</b>. <b>⋯</b> to cancel one or add more.</li>
       </ul>
     </section>
     <section>
       <h2>5 · Patient leaving</h2>
       <ul>
-        <li><b>Bed assigned</b>: the patient moved to an ED bed.</li>
+        <li><b>Placed on bed</b>: the patient moved onto an ED bed.</li>
         <li><b>Discharged</b>: pick the reason (Discharged home, DAMA, Absconded, LWBS, Transferred) or type another.</li>
         <li><b>Entered in error</b>: wrong patient or duplicate.</li>
         <li>Everything open is closed at once. Mistake? <b>Undo</b> on the dashboard.</li>
       </ul>
     </section>
     <section>
-      <h2>6 · Handover and reports</h2>
+      <h2>6 · Notes</h2>
+      <ul>
+        <li>Open a patient, then <b>Add note</b>. Choose the type: nursing note, CNR, patient refused, escalated to physician, medication given, pain reassessed, family / social, other.</li>
+        <li>Notes go in the patient record, the audit trail and the Notes export.</li>
+      </ul>
+    </section>
+    <section>
+      <h2>7 · Handover and reports</h2>
       <ul>
         <li><b>Shift Handover</b> builds the SBAR from the live list. Copy or print it.</li>
         <li>A shift report (one PDF) is emailed automatically at 06:00, 14:00 and 22:00.</li>
@@ -88,10 +98,10 @@
       <h2>Training: practise before your first live shift</h2>
       <p>Open <b>adultpulseed.patientflowms.com/?training</b>. Made-up patients only, kept on that PC; nothing reaches the live register. Use any name to sign in. Try each task once:</p>
       <ol>
-        <li>Add a CTAS 3 patient waiting for vital signs and a bed (booked by a physician).</li>
-        <li>Press <b>Done</b> for an overdue vital signs patient.</li>
-        <li>Move a procedure or imaging request to <b>Done</b>.</li>
-        <li>On <b>Waiting for Bed</b>, assign a bed and see it under “Beds assigned”.</li>
+        <li>Add a CTAS 3 patient waiting for vital signs, a bed (booked by a physician) and two orders (e.g. CT + IV fluids).</li>
+        <li>Press <b>Done</b> for an overdue vital signs patient; press <b>CNR</b> for another, then <b>Found</b>.</li>
+        <li>Move one order to <b>Done</b> and start the other.</li>
+        <li>On <b>Waiting for Bed</b>, <b>Assign bed</b>, then <b>Placed on bed</b>, and see it under “Placed on bed”.</li>
         <li>Discharge a patient as <b>DAMA</b>, then undo it from the dashboard.</li>
         <li>Open <b>Shift Handover</b> and the <b>Audit Trail</b> and find your own actions.</li>
       </ol>
