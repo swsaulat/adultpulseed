@@ -17,11 +17,13 @@
       if (!this.ctx) this.unlock();
       const c = this.ctx;
       if (!c || c.state !== 'running') { this.blocked = true; return false; }
-      const tones = kind === 'critical' ? [880, 660, 880, 660] : kind === 'test' ? [660] : [587.33, 880];
+      // critical = CTAS 1 · overdue = vital signs overdue · wait = long bed / procedure wait · due = vital signs due soon (soft)
+      const tones = kind === 'critical' ? [880, 660, 880, 660] : kind === 'test' ? [660] : kind === 'wait' ? [440, 554.37, 440] : kind === 'due' ? [523.25] : [587.33, 880];
+      const vol = kind === 'due' ? 0.1 : 0.18;
       tones.forEach((f, i) => {
         const t = c.currentTime + i * 0.28, o = c.createOscillator(), g = c.createGain();
         o.type = 'sine'; o.frequency.setValueAtTime(f, t);
-        g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.18, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.25);
+        g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.25);
         o.connect(g); g.connect(c.destination); o.start(t); o.stop(t + 0.27);
       });
       return true;
@@ -38,23 +40,33 @@
   if (!leader) navigator.locks.request('pulseed-leader', () => { leader = true; return new Promise(() => {}); });
 
   // ------------------------------------------------------------------ alert engine
-  let known = new Set(), lastChime = 0;
+  // Each alert type keeps its own memory of what it has already sounded for and when it last sounded,
+  // so a busy minute of one type never swallows another. At most one sound every 20 s, highest priority first.
+  const heard = { critical: new Set(), overdue: new Set(), wait: new Set(), due: new Set() };
+  const lastOf = { critical: 0, overdue: 0, wait: 0, due: 0 };
   function alerts() {
     if (!S.user && S.device.mode) { /* keep evaluating so the chime still sounds on a locked screen */ }
-    const L = UI.lists();
-    // A new long bed wait chimes once; overdue vital signs and CTAS 1 keep repeating until handled.
-    const repeat = L.overdue.map(p => p.id).concat(L.ctas1.map(p => 'c1' + p.id));
-    const ids = new Set(repeat.concat(L.longBed.map(p => 'bw' + p.id)));
-    const fresh = [...ids].some(id => !known.has(id));
-    known = ids;
-    const t = Date.now();
-    if (S.device.sound && ids.size) {
-      const shared = U.ls.get('pulseed:v2:lastChime', 0); // de-duplicate between tabs on this PC
-      const due = repeat.length && t - Math.max(lastChime, shared) >= S.settings.chimeRepeatMin * 60000;
-      if ((fresh && t - shared > 5000) || due) {
-        if (PE.audio.chime(L.ctas1.length ? 'critical' : 'overdue')) { lastChime = t; try { U.ls.set('pulseed:v2:lastChime', t); } catch (e) { /* ignore */ } }
-      }
+    const L = UI.lists(), s = S.settings, t = Date.now();
+    const keys = {
+      critical: L.ctas1.map(p => p.id),                                                        // CTAS 1 in the area
+      overdue: L.overdue.map(p => p.id),                                                       // vital signs overdue
+      wait: L.longBed.map(p => 'b' + p.id).concat(L.longProc.map(p => 'p' + p.id)),        // bed / procedure past the red limit
+      due: L.dueSoon.map(p => p.id + '@' + D.vitalsTiming(p, s, t).due),                       // vital signs due soon (once per due time)
+    };
+    const repeat = { critical: (s.chimeRepeatMin || 2) * 60000, overdue: (s.chimeRepeatMin || 2) * 60000, wait: (s.longWaitRepeatMin || 15) * 60000, due: Infinity };
+    // Forget what is no longer alerting, so it sounds again if it comes back.
+    Object.keys(keys).forEach(k => { const now = new Set(keys[k]); heard[k].forEach(x => { if (!now.has(x)) heard[k].delete(x); }); });
+    if (!S.device.sound) { Object.keys(keys).forEach(k => keys[k].forEach(x => heard[k].add(x))); return runSystem(L, t); }
+    const shared = U.ls.get('pulseed:v2:lastChime', 0); // another tab on this PC
+    if (t - shared < 20000) return runSystem(L, t);
+    const kind = ['critical', 'overdue', 'wait', 'due'].find(k => keys[k].length && (keys[k].some(x => !heard[k].has(x)) || t - lastOf[k] >= repeat[k]));
+    if (kind && PE.audio.chime(kind)) {
+      lastOf[kind] = t; keys[kind].forEach(x => heard[kind].add(x));
+      try { U.ls.set('pulseed:v2:lastChime', t); } catch (e) { /* ignore */ }
     }
+    runSystem(L, t);
+  }
+  function runSystem(L, t) {
     if (leader && L.overdue.length && !S.isShared()) { // the shared register logs overdue events itself (server watchdog)
       L.overdue.forEach(p => {
         const tm = D.vitalsTiming(p, S.settings, t);
@@ -109,6 +121,7 @@
     setInterval(() => { UI.renderChrome(); UI.renderBody(); }, 15000);
     setInterval(() => { alerts(); autoLock(); }, 5000);
     setTimeout(alerts, 1500);
+    PE.alerts = alerts; // for the alert tests
     setInterval(() => leader && S.purge(), 30 * 60000);
     if (leader) S.purge();
   }

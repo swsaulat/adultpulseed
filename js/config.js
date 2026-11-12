@@ -25,6 +25,7 @@
     procWaitRedMin: 120,
 
     chimeRepeatMin: 2,
+    longWaitRepeatMin: 15, // waiting for bed / procedure past its red limit: reminder sound every 15 min
     autoLockMin: 15,
     exitedRetentionHours: 72,
     eventRetentionHours: 168,

@@ -73,7 +73,8 @@
     const ctas1 = a.filter(p => p.ctas === 'CTAS 1');
     const noWf = a.filter(p => !D.activeWfs(p).length);
     const longBed = bed.filter(p => D.bedWait(p, s, t).level === 'red');
-    return { a, vit, bed, proc, overdue, dueSoon, ctas1, noWf, longBed };
+    const longProc = proc.filter(p => D.procWait(p, s, t).level === 'red');
+    return { a, vit, bed, proc, overdue, dueSoon, ctas1, noWf, longBed, longProc };
   };
 
   UI.vs = { };
@@ -158,6 +159,8 @@
       list: lst(L.overdue, p => { const m = D.vitalsTiming(p, st(), now()).overdueMin; return `<button class="link" data-act="reassess" data-id="${esc(p.id)}">${esc(p.urn)} (${esc(m < 1 ? '<1m' : U.dur(m))})</button>`; }) });
     if (L.longBed.length) A.push({ k: 'longbed', ic: 'bed', label: `${L.longBed.length} waiting for bed over ${U.dur(st().bedWaitRedMin)}`, note: 'Escalate to the bed coordinator. Click a patient to assign the bed.',
       list: lst(L.longBed, p => `<button class="link" data-act="bed" data-id="${esc(p.id)}">${esc(p.urn)} (${esc(U.dur(D.bedWait(p, st(), now()).mins))}, booked by ${esc(p.workflows.bed.bookedBy)})</button>`) });
+    if (L.longProc.length) A.push({ k: 'longproc', ic: 'syringe', label: `${L.longProc.length} procedure / imaging waiting over ${U.dur(st().procWaitRedMin)}`, note: 'Chase the request. Click a patient to update it.',
+      list: lst(L.longProc, p => `<button class="link" data-act="proc" data-id="${esc(p.id)}">${esc(p.urn)} · ${esc(p.workflows.procedure.description)} (${esc(U.dur(D.procWait(p, st(), now()).mins))})</button>`) });
     if (UI.alertOpen && !A.some(x => x.k === UI.alertOpen)) UI.alertOpen = null;
     const open = A.find(x => x.k === UI.alertOpen);
     const chips = A.map(x => `<button class="achip ${x.pulse ? 'pulse' : ''} ${UI.alertOpen === x.k ? 'on' : ''}" data-act="alerttoggle" data-id="${x.k}" aria-expanded="${UI.alertOpen === x.k}">${ic(x.ic)}<span>${esc(x.label)}</span>${ic('chev')}</button>`).join('');
@@ -168,7 +171,7 @@
 
     // sidebar
     const badges = { dashboard: L.a.length, vitals: L.vit.length, bed: L.bed.length, procedure: L.proc.length, patients: L.a.length };
-    const hot = { vitals: L.overdue.length > 0, bed: L.longBed.length > 0 };
+    const hot = { vitals: L.overdue.length > 0, bed: L.longBed.length > 0, procedure: L.longProc.length > 0 };
     $('#side').innerHTML = `<nav aria-label="Views"><div class="navh">Reassessment Area</div>${NAV.filter(([k]) => canSee(k)).map(([k, label, icon]) => `
       <button class="nav ${UI.view === k ? 'active' : ''}" data-act="nav" data-id="${k}" aria-current="${UI.view === k ? 'page' : 'false'}">
         ${ic(icon)}<span>${label}</span>${badges[k] != null ? `<b class="nb ${hot[k] ? 'hot' : ''}">${badges[k]}</b>` : ''}</button>`).join('')}</nav>
@@ -1052,7 +1055,7 @@
       <section class="panel"><h3>Wait-time thresholds &amp; alerts</h3><div class="g4">
         ${num('bedWaitAmberMin', s.bedWaitAmberMin, 1, 1440, 'Bed wait amber (min)', 'From the booking time')}${num('bedWaitRedMin', s.bedWaitRedMin, 1, 1440, 'Bed wait red (min)', 'Shown as an alert')}
         ${num('procWaitAmberMin', s.procWaitAmberMin, 1, 1440, 'Procedure / imaging amber (min)')}${num('procWaitRedMin', s.procWaitRedMin, 1, 1440, 'Procedure / imaging red (min)')}
-        ${num('chimeRepeatMin', s.chimeRepeatMin, 1, 30, 'Repeat overdue chime every (min)')}${num('autoLockMin', s.autoLockMin, 0, 240, 'Auto-lock after inactivity (min)', '0 = never (not recommended)')}
+        ${num('chimeRepeatMin', s.chimeRepeatMin, 1, 30, 'Repeat overdue / CTAS 1 sound every (min)')}${num('longWaitRepeatMin', s.longWaitRepeatMin || 15, 1, 120, 'Repeat long-wait sound every (min)', 'Bed or procedure past its red limit')}${num('autoLockMin', s.autoLockMin, 0, 240, 'Auto-lock after inactivity (min)', '0 = never (not recommended)')}
         ${num('exitedRetentionHours', s.exitedRetentionHours, 24, 2160, 'Keep exited patients (h)')}${num('eventRetentionHours', s.eventRetentionHours, 24, 8760, 'Keep audit events on this PC (h)')}
       </div></section>
       <section class="panel"><h3>Lists</h3><p class="hint">One entry per line. These are suggestions; staff can always type something else.</p><div class="g4">
@@ -1096,7 +1099,7 @@
         next.siteName = U.norm(d.siteName) || 'Emergency Department';
         next.stationName = U.norm(d.stationName) || 'Reassessment Area';
         ['2', '3', '4', '5'].forEach(c => { const v = n('iv_' + c); if (v < 1 || v > 480) throw new D.RuleError(`CTAS ${c} interval must be 1–480 min.`); next.ctasIntervals['CTAS ' + c] = v; });
-        ['dueSoonMaxMin', 'backdateMaxMin', 'complianceTargetPct', 'bedWaitAmberMin', 'bedWaitRedMin', 'procWaitAmberMin', 'procWaitRedMin', 'chimeRepeatMin', 'autoLockMin', 'exitedRetentionHours', 'eventRetentionHours'].forEach(k => (next[k] = n(k)));
+        ['dueSoonMaxMin', 'backdateMaxMin', 'complianceTargetPct', 'bedWaitAmberMin', 'bedWaitRedMin', 'procWaitAmberMin', 'procWaitRedMin', 'chimeRepeatMin', 'longWaitRepeatMin', 'autoLockMin', 'exitedRetentionHours', 'eventRetentionHours'].forEach(k => (next[k] = n(k)));
         next.physicians = U.uniq(U.lines(d.physicians));
         next.dueSoonFraction = n('dueSoonPct') / 100;
         if (next.bedWaitAmberMin >= next.bedWaitRedMin || next.procWaitAmberMin >= next.procWaitRedMin) throw new D.RuleError('Amber thresholds must be lower than red thresholds.');
@@ -1160,7 +1163,7 @@
       if (S.isShared()) { S.adapter.setToken(null); try { google.accounts.id.disableAutoSelect(); } catch (e) { /* not loaded */ } }
       UI.closeAll(); UI.refresh(); UI.signInModal('locked');
     },
-    testchime: () => PE.audio && PE.audio.chime('overdue'),
+    testchime: async () => { if (!PE.audio) return; for (const k of ['due', 'overdue', 'wait', 'critical']) { PE.audio.chime(k); await new Promise(r => setTimeout(r, 1500)); } UI.toast('Played: due soon, overdue, long wait, CTAS 1.'); },
     rename: () => UI.modal({ title: 'Rename station', icon: 'edit', body: field('Station name', inp('n', S.device.deviceName, 'maxlength="40" autofocus')), onSubmit: async (f, d) => { S.device.deviceName = U.norm(d.n); S.saveDevice(); UI.renderChrome(); } }),
     verify: () => {
       const r = D.verifyChain(S.state);
