@@ -255,6 +255,7 @@
       const st = await S.adapter.load();
       const saved = await S.adapter.loadSettings();
       if (saved) S.settings = S.mergeSettings(saved);
+      Object.values(st.patients || {}).forEach(D.upgradePatient); // records saved by an earlier version, read in the current shape
       S.state = st;
       if (S.isShared() && S.adapter.online) S.error = null;
     } catch (e) { S.error = e.message; }

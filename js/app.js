@@ -50,8 +50,9 @@
     const keys = {
       critical: L.ctas1.map(p => p.id),                                                        // CTAS 1 in the area
       overdue: L.overdue.map(p => p.id),                                                       // vital signs overdue
-      wait: L.longBed.map(p => 'b' + p.id).concat(L.longProc.map(p => 'p' + p.id)),        // bed / procedure past the red limit
-      due: L.dueSoon.map(p => p.id + '@' + D.vitalsTiming(p, s, t).due),                       // vital signs due soon (once per due time)
+      wait: L.longBed.map(p => 'b' + p.id).concat(L.longProc.map(p => 'p' + p.id), L.longPlace.map(p => 'a' + p.id)), // bed / order / placement past the red limit
+      due: L.dueSoon.map(p => p.id + '@' + D.vitalsTiming(p, s, t).due)                        // vital signs due soon (once per due time)
+        .concat(L.cnrDue.map(p => 'c' + p.id + '@' + p.cnr.at)),                                 // CNR: time to call the patient again (once per call)
     };
     const repeat = { critical: (s.chimeRepeatMin || 2) * 60000, overdue: (s.chimeRepeatMin || 2) * 60000, wait: (s.longWaitRepeatMin || 15) * 60000, due: Infinity };
     // Forget what is no longer alerting, so it sounds again if it comes back.

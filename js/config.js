@@ -2,7 +2,7 @@
 (function (PE) {
   'use strict';
 
-  PE.VERSION = '3.0.0';
+  PE.VERSION = '3.1.0';
   PE.PRODUCT = 'PulseED Reassessment Area Management System';
 
   PE.DEFAULT_SETTINGS = {
@@ -23,6 +23,11 @@
     bedWaitRedMin: 120,
     procWaitAmberMin: 60,
     procWaitRedMin: 120,
+    // Two-step bed: assigned, then placed. Time from assignment until the patient is moved onto the bed.
+    placeWaitAmberMin: 20,
+    placeWaitRedMin: 45,
+    // CNR (called, not around): call the patient again after this many minutes.
+    cnrRecallMin: 10,
 
     chimeRepeatMin: 2,
     longWaitRepeatMin: 15, // waiting for bed / procedure past its red limit: reminder sound every 15 min

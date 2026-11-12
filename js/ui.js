@@ -38,6 +38,8 @@
     shield: 'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10zM9 12l2 2 4-4',
     undo: 'M3 7v6h6M21 17a9 9 0 0 0-15-6.7L3 13',
     logo: 'M3 12h4l3-8 4 16 3-8h4',
+    phone: 'M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2z',
+    note: 'M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM14 3v6h6M8 13h8M8 17h5',
   };
   const ic = (n, cls = '') => `<svg class="ic ${cls}" viewBox="0 0 24 24" aria-hidden="true"><path d="${P[n] || ''}"/></svg>`;
   UI.ic = ic;
@@ -57,6 +59,9 @@
   const urnLink = p => `<button class="urn" data-act="open" data-id="${esc(p.id)}" title="Open patient record">${esc(p.urn)}</button>`;
   const btn = (act, id, label, cls = '', icon = '') => `<button class="btn sm ${cls}" data-act="${act}" data-id="${esc(id)}">${icon ? ic(icon) : ''}<span>${label}</span></button>`;
   const exitPill = x => pill(D.exitText(x), x.type === 'bed' ? 'green' : x.type === 'error' ? 'grey' : /^(dama|absconded|lwbs)$/i.test(x.reason) ? 'amber' : 'sky');
+  const cnrPill = p => (p.cnr ? `<span class="pill amber cnrpill" title="Called, not around — last called ${esc(U.t24(p.cnr.at))}">${ic('phone')}CNR${p.cnr.count > 1 ? ' ×' + p.cnr.count : ''}</span>` : '');
+  const kindTone = k => (k === 'Radiology Imaging' ? 'blue' : k === 'Treatment' ? 'green' : 'sky');
+  const kindShort = k => (k === 'Radiology Imaging' ? 'Imaging' : k);
   const procTone = s => ({ Waiting: 'amber', 'In Progress': 'blue', Done: 'green', Cancelled: 'grey', 'Closed at exit': 'grey' }[s] || 'amber');
   const empty = (msg, cols) => `<tr><td class="empty" colspan="${cols}">${esc(msg)}</td></tr>`;
   const searchBox = (key, ph) => `<label class="search">${ic('search')}<input type="search" data-filter="${key}" placeholder="${esc(ph)}" value="${esc(UI.vs[key] || '')}" aria-label="${esc(ph)}"></label>`;
@@ -72,9 +77,15 @@
     const dueSoon = vit.filter(p => D.vitalsTiming(p, s, t).state === 'dueSoon');
     const ctas1 = a.filter(p => p.ctas === 'CTAS 1');
     const noWf = a.filter(p => !D.activeWfs(p).length);
-    const longBed = bed.filter(p => D.bedWait(p, s, t).level === 'red');
+    // Two-step bed: still waiting for a bed to be assigned, or assigned and waiting to be placed on it.
+    const bedWaiting = bed.filter(p => !p.workflows.bed.assignedBed);
+    const toPlace = bed.filter(p => p.workflows.bed.assignedBed).sort((x, y) => D.placeWait(y, s, t).mins - D.placeWait(x, s, t).mins);
+    const longBed = bedWaiting.filter(p => D.bedWait(p, s, t).level === 'red');
+    const longPlace = toPlace.filter(p => D.placeWait(p, s, t).level === 'red');
     const longProc = proc.filter(p => D.procWait(p, s, t).level === 'red');
-    return { a, vit, bed, proc, overdue, dueSoon, ctas1, noWf, longBed, longProc };
+    const cnr = a.filter(p => p.cnr).sort((x, y) => U.toMs(x.cnr.at) - U.toMs(y.cnr.at));
+    const cnrDue = cnr.filter(p => D.cnrInfo(p, s, t).due);
+    return { a, vit, bed, bedWaiting, toPlace, proc, overdue, dueSoon, ctas1, noWf, longBed, longPlace, longProc, cnr, cnrDue };
   };
 
   UI.vs = { };
@@ -157,10 +168,14 @@
       list: lst(L.ctas1, p => `<button class="link" data-act="open" data-id="${esc(p.id)}">${esc(p.urn)}</button>`) });
     if (L.overdue.length) A.push({ k: 'overdue', ic: 'bell', label: `${L.overdue.length} vital signs overdue`, note: 'Click a patient when the vital signs are done.' + (!S.device.sound ? ' <span class="pill amber">sound muted</span>' : ''),
       list: lst(L.overdue, p => { const m = D.vitalsTiming(p, st(), now()).overdueMin; return `<button class="link" data-act="reassess" data-id="${esc(p.id)}">${esc(p.urn)} (${esc(m < 1 ? '<1m' : U.dur(m))})</button>`; }) });
+    if (L.cnrDue.length) A.push({ k: 'cnr', ic: 'phone', label: `${L.cnrDue.length} CNR to call again`, note: 'Called earlier and not in the waiting area. Call again; press Found when the patient is back.',
+      list: lst(L.cnrDue, p => { const c = D.cnrInfo(p, st(), now()); return `<button class="link" data-act="found" data-id="${esc(p.id)}">${esc(p.urn)} (×${c.count}, ${esc(U.dur(c.mins))} ago)</button>`; }) });
+    if (L.longPlace.length) A.push({ k: 'longplace', ic: 'bed', label: `${L.longPlace.length} bed assigned, not placed over ${U.dur(st().placeWaitRedMin || 45)}`, note: 'The bed is ready: move the patient, then press Placed on bed.',
+      list: lst(L.longPlace, p => `<button class="link" data-act="place" data-id="${esc(p.id)}">${esc(p.urn)} → ${esc(p.workflows.bed.assignedBed)} (${esc(U.dur(D.placeWait(p, st(), now()).mins))})</button>`) });
     if (L.longBed.length) A.push({ k: 'longbed', ic: 'bed', label: `${L.longBed.length} waiting for bed over ${U.dur(st().bedWaitRedMin)}`, note: 'Escalate to the bed coordinator. Click a patient to assign the bed.',
       list: lst(L.longBed, p => `<button class="link" data-act="bed" data-id="${esc(p.id)}">${esc(p.urn)} (${esc(U.dur(D.bedWait(p, st(), now()).mins))}, booked by ${esc(p.workflows.bed.bookedBy)})</button>`) });
     if (L.longProc.length) A.push({ k: 'longproc', ic: 'syringe', label: `${L.longProc.length} procedure / imaging waiting over ${U.dur(st().procWaitRedMin)}`, note: 'Chase the request. Click a patient to update it.',
-      list: lst(L.longProc, p => `<button class="link" data-act="proc" data-id="${esc(p.id)}">${esc(p.urn)} · ${esc(p.workflows.procedure.description)} (${esc(U.dur(D.procWait(p, st(), now()).mins))})</button>`) });
+      list: lst(L.longProc, p => `<button class="link" data-act="proc" data-id="${esc(p.id)}">${esc(p.urn)} · ${esc(D.openOrders(p).map(it => it.description).join(', '))} (${esc(U.dur(D.procWait(p, st(), now()).mins))})</button>`) });
     if (UI.alertOpen && !A.some(x => x.k === UI.alertOpen)) UI.alertOpen = null;
     const open = A.find(x => x.k === UI.alertOpen);
     const chips = A.map(x => `<button class="achip ${x.pulse ? 'pulse' : ''} ${UI.alertOpen === x.k ? 'on' : ''}" data-act="alerttoggle" data-id="${x.k}" aria-expanded="${UI.alertOpen === x.k}">${ic(x.ic)}<span>${esc(x.label)}</span>${ic('chev')}</button>`).join('');
@@ -171,7 +186,7 @@
 
     // sidebar
     const badges = { dashboard: L.a.length, vitals: L.vit.length, bed: L.bed.length, procedure: L.proc.length, patients: L.a.length };
-    const hot = { vitals: L.overdue.length > 0, bed: L.longBed.length > 0, procedure: L.longProc.length > 0 };
+    const hot = { vitals: L.overdue.length > 0 || L.cnrDue.length > 0, bed: L.longBed.length + L.longPlace.length > 0, procedure: L.longProc.length > 0 };
     $('#side').innerHTML = `<nav aria-label="Views"><div class="navh">Reassessment Area</div>${NAV.filter(([k]) => canSee(k)).map(([k, label, icon]) => `
       <button class="nav ${UI.view === k ? 'active' : ''}" data-act="nav" data-id="${k}" aria-current="${UI.view === k ? 'page' : 'false'}">
         ${ic(icon)}<span>${label}</span>${badges[k] != null ? `<b class="nb ${hot[k] ? 'hot' : ''}">${badges[k]}</b>` : ''}</button>`).join('')}</nav>
@@ -179,6 +194,8 @@
         <div><span>Patients here</span><b>${L.a.length}</b></div>
         <div><span>Vital signs overdue</span><b class="${L.overdue.length ? 'tred' : ''}">${L.overdue.length}</b></div>
         <div><span>Waiting for bed</span><b class="${L.longBed.length ? 'tred' : ''}">${L.bed.length}</b></div>
+        ${L.cnr.length ? `<div><span>CNR (called, not around)</span><b class="tamber">${L.cnr.length}</b></div>` : ''}
+        ${L.toPlace.length ? `<div><span>Bed assigned, to move</span><b class="${L.longPlace.length ? 'tred' : ''}">${L.toPlace.length}</b></div>` : ''}
         ${L.noWf.length ? `<div><span>Nothing open</span><b class="tamber">${L.noWf.length}</b></div>` : ''}
         <div class="learn">${(window.PULSEED_SITE || {}).training
           ? `<a class="link" href="${esc(location.pathname)}">${ic('shield')}Back to live PulseED</a>`
@@ -268,10 +285,12 @@
       <div class="ph"><h3>${ic('clock', 'tsky')}${esc(D.shiftTitle(cur))} <small class="hint">${U.dur(Math.max(0, Math.ceil((cur.to - t) / 60000)))} left</small></h3>${shiftToggle(k => `data-act="shiftview" data-id="${k}"`)}</div>
       <div class="tw"><table><thead><tr><th>Measure</th><th>This shift so far</th><th>Previous shift (${esc(prev.label)})</th></tr></thead><tbody>
         ${row('Added to the area', x => x.registered)}
-        ${row('Left the area', x => `${x.exited} <span class="hint">(bed ${x.bedAssigned} · discharged ${x.discharged})</span>`)}
+        ${row('Left the area', x => `${x.exited} <span class="hint">(placed on bed ${x.bedAssigned} · discharged ${x.discharged})</span>`)}
         ${row('Discharge reasons', x => (x.reasons.length ? x.reasons.map(r => `${esc(r.label)} ${r.n}`).join(' · ') : '—'))}
         ${row(`Vital signs on time (target ≥ ${st().complianceTargetPct}%)`, x => pct(x.compliance))}
         ${row('Median wait: bed booked → assigned', x => mins(x.bedWait))}
+        ${row('Median: bed assigned → patient placed', x => mins(x.placeWait))}
+        ${row('CNR calls (called, not around)', x => x.cnrCalls)}
         ${row('Median time: procedure / imaging done', x => mins(x.procTat))}
       </tbody></table></div>${pdf}</section>`;
   }
@@ -302,9 +321,9 @@
     if (!page) return UI.toast('Pop-up blocked — allow pop-ups to print.', 'warn');
     page.document.write(`<!doctype html><meta charset="utf-8"><title>PulseED ${esc(title)}</title><style>@page{size:A4;margin:12mm}body{font:13px Arial,sans-serif;color:#0f172a}table{width:100%;border-collapse:collapse;margin:10px 0}td{border-bottom:1px solid #e2e8f0;padding:5px}pre{white-space:pre-wrap;font:11px Consolas,monospace}</style>
       <h1>PulseED Reassessment Area — Shift Report</h1><p><b>${esc(title)}</b>${S.device.mode === 'demo' ? ' · TRAINING: synthetic data' : ''}</p>
-      <table><tr><td>Added to the area</td><td>${x.registered}</td></tr><tr><td>Left the area</td><td>${x.exited} (bed assigned ${x.bedAssigned}, discharged ${x.discharged})</td></tr>
+      <table><tr><td>Added to the area</td><td>${x.registered}</td></tr><tr><td>Left the area</td><td>${x.exited} (placed on bed ${x.bedAssigned}, discharged ${x.discharged})</td></tr>
       <tr><td>Discharge reasons</td><td>${esc(x.reasons.map(r => r.label + ' ' + r.n).join(', ') || '—')}</td></tr><tr><td>Vital signs on time</td><td>${x.compliance.pct == null ? '—' : x.compliance.pct + '%'}</td></tr>
-      <tr><td>Median wait: bed booked → assigned</td><td>${k(x.bedWait)}</td></tr><tr><td>Median time: procedure / imaging done</td><td>${k(x.procTat)}</td></tr></table>
+      <tr><td>Median wait: bed booked → assigned</td><td>${k(x.bedWait)}</td></tr><tr><td>Median: bed assigned → placed</td><td>${k(x.placeWait)}</td></tr><tr><td>CNR calls</td><td>${x.cnrCalls}</td></tr><tr><td>Median time: procedure / imaging done</td><td>${k(x.procTat)}</td></tr></table>
       <pre>${esc(D.sbar(S.state, st(), t, { privacy: true, user: S.user.name, demo: S.device.mode === 'demo', window: { from: w.from, to, title } }))}</pre>`);
     page.document.close(); page.print();
   };
@@ -323,23 +342,31 @@
             <button class="nh" data-act="nav" data-id="${view}"><span class="ni">${ic(icon)}</span><span class="nt"><b>${D.WF[k]}</b><small>${sub}</small></span><span class="nc">${count}</span></button>
             <ul class="nlist">${rows}</ul>${more(count, view)}</section>`;
         const line = (p, mid, right, act) => `<li>${urnLink(p)}<span class="nn">${nm(p)}<small>${mid}</small></span>${right}${act}</li>`;
-        const vit = L.vit.slice(0, 5).map(p => { const tm = D.vitalsTiming(p, s, t); return line(p, `${esc(p.ctas)} · ${esc(p.diagnosis)}`, timingS(tm), btn('reassess', p.id, 'Done', 'ghost', 'check')); }).join('') || '<li class="nempty">No one waiting for vital signs.</li>';
-        const bed = L.bed.slice(0, 5).map(p => { const b = p.workflows.bed; return line(p, `Booked by ${esc(b.bookedBy)} · ${U.t24(b.bookedAt)}`, waitB(D.bedWait(p, s, t)), btn('bed', p.id, 'Assign bed', 'green', 'bed')); }).join('') || '<li class="nempty">No one waiting for a bed.</li>';
-        const proc = L.proc.slice(0, 5).map(p => { const r = p.workflows.procedure; return line(p, `${esc(r.kind)}: ${esc(r.description)}`, pill(r.status, procTone(r.status)), btn('proc', p.id, 'Update', 'ghost', 'edit')); }).join('') || '<li class="nempty">No procedures, treatments or imaging waiting.</li>';
-        const longest = L.bed.length ? D.bedWait(L.bed[0], s, t) : null;
-        const inProg = L.proc.filter(p => p.workflows.procedure.status === 'In Progress').length;
+        const vit = L.vit.slice(0, 5).map(p => { const tm = D.vitalsTiming(p, s, t); return line(p, `${cnrPill(p)}${esc(p.ctas)} · ${esc(p.diagnosis)}`, timingS(tm), btn('reassess', p.id, 'Done', 'ghost', 'check')); }).join('') || '<li class="nempty">No one waiting for vital signs.</li>';
+        // Beds already assigned (patient still to be moved) first: they are one step from leaving.
+        const bed = L.toPlace.concat(L.bedWaiting).slice(0, 5).map(p => { const b = p.workflows.bed; return b.assignedBed
+          ? line(p, `<span class="pill green">${esc(b.assignedBed)}</span> assigned ${U.t24(b.assignedAt)}`, waitB(D.placeWait(p, s, t)), btn('place', p.id, 'Placed', 'green', 'check'))
+          : line(p, `Booked by ${esc(b.bookedBy)} · ${U.t24(b.bookedAt)}`, waitB(D.bedWait(p, s, t)), btn('bed', p.id, 'Assign bed', 'green', 'bed')); }).join('') || '<li class="nempty">No one waiting for a bed.</li>';
+        const proc = L.proc.slice(0, 5).map(p => { const o = D.openOrders(p); return line(p, o.map(it => `<span class="ord">${esc(kindShort(it.kind))}: ${esc(it.description)}${it.status === 'In Progress' ? ' <i class="tblue">· in progress</i>' : ''}</span>`).join(''), o.length > 1 ? pill(`${o.length} orders`, 'blue') : pill(o[0].status, procTone(o[0].status)), btn('proc', p.id, 'Update', 'ghost', 'edit')); }).join('') || '<li class="nempty">No procedures, treatments or imaging waiting.</li>';
+        const longest = L.bedWaiting.length ? D.bedWait(L.bedWaiting.slice().sort((x, y) => D.bedWait(y, s, t).mins - D.bedWait(x, s, t).mins)[0], s, t) : null;
+        const orders = L.proc.reduce((n, p) => n + D.openOrders(p).length, 0);
+        const inProg = L.proc.reduce((n, p) => n + D.openOrders(p).filter(it => it.status === 'In Progress').length, 0);
+        const cnrPanel = !L.cnr.length ? '' : `<section class="panel cnrp"><div class="ph"><h3>${ic('phone', 'tamber')}Called — not around (CNR) · ${L.cnr.length}</h3><span class="hint">Call again before the next vital signs. Press <b>Found</b> when the patient is back.</span></div>
+            <ul class="nlist cnrlist">${L.cnr.map(p => { const c = D.cnrInfo(p, s, t), tm = p.workflows.vitals.active ? D.vitalsTiming(p, s, t) : null;
+              return `<li class="${c.due ? 'due' : ''}">${urnLink(p)}<span class="nn">${nm(p)}<small>CNR ×${c.count} · last called ${U.t24(c.at)} by ${esc(c.by)} · ${c.due ? '<b class="tamber">call again now</b>' : 'call again at ' + U.t24(c.recallAt)}</small></span>${tm ? timingS(tm) : ''}<span class="nowrap">${btn('cnr', p.id, 'Still not around', 'ghost', 'phone')} ${btn('found', p.id, 'Found', 'green', 'check')}</span></li>`; }).join('')}</ul></section>`;
         return `
           <section class="hello">
             <div><h2>Reassessment Area <span class="status ${urgent ? 'bad' : 'ok'}">${urgent ? `${urgent} need${urgent > 1 ? '' : 's'} attention` : 'All on track'}</span></h2>
-              <p>${L.a.length} patient${L.a.length === 1 ? '' : 's'} here now · ${L.vit.length} vital signs · ${L.bed.length} waiting for bed · ${L.proc.length} procedure / imaging</p></div>
+              <p>${L.a.length} patient${L.a.length === 1 ? '' : 's'} here now · ${L.vit.length} vital signs · ${L.bed.length} waiting for bed · ${L.proc.length} procedure / imaging${L.cnr.length ? ` · <b class="tamber">${L.cnr.length} CNR</b>` : ''}</p></div>
             <button class="btn primary lg" data-act="new">${ic('plus')}<span>Add Patient</span></button>
           </section>
+          ${cnrPanel}
           <section class="needs">
             ${card('vitals', L.overdue.length || L.ctas1.length ? 'red' : 'sky', 'heart', L.vit.length, L.overdue.length ? `<span class="tred">${L.overdue.length} overdue</span> · ${L.dueSoon.length} due soon` : `${L.dueSoon.length} due soon · none overdue`, vit, 'vitals')}
-            ${card('bed', L.longBed.length ? 'red' : 'amber', 'bed', L.bed.length, longest ? `Longest wait ${U.dur(longest.mins)}${L.longBed.length ? ` · <span class="tred">${L.longBed.length} over ${U.dur(s.bedWaitRedMin)}</span>` : ''}` : 'Nobody waiting', bed, 'bed')}
-            ${card('procedure', 'blue', 'syringe', L.proc.length, `${inProg} in progress · ${L.proc.length - inProg} waiting`, proc, 'procedure')}
+            ${card('bed', L.longBed.length || L.longPlace.length ? 'red' : 'amber', 'bed', L.bed.length, L.bed.length ? `${L.bedWaiting.length} waiting${longest ? ` (longest ${U.dur(longest.mins)})` : ''} · ${L.toPlace.length ? `<span class="${L.longPlace.length ? 'tred' : 'tgreen'}">${L.toPlace.length} assigned, to move</span>` : '0 assigned'}` : 'Nobody waiting', bed, 'bed')}
+            ${card('procedure', 'blue', 'syringe', L.proc.length, L.proc.length ? `${orders} order${orders === 1 ? '' : 's'} · ${inProg} in progress` : 'Nothing waiting', proc, 'procedure')}
           </section>
-          ${L.noWf.length ? `<section class="panel warnp"><div class="ph"><h3>${ic('door', 'tamber')}Nothing open — record the exit (${L.noWf.length})</h3><span class="hint">These patients have no need left open. Assign a bed, discharge, or add a need.</span></div>
+          ${L.noWf.length ? `<section class="panel warnp"><div class="ph"><h3>${ic('door', 'tamber')}Nothing open — record the exit (${L.noWf.length})</h3><span class="hint">These patients have no need left open. Place on a bed, discharge, or add a need.</span></div>
             <div class="tw"><table><tbody>${L.noWf.map(p => `<tr><td>${urnLink(p)}</td><td class="b">${nm(p)}</td><td>${esc(p.diagnosis)}</td><td class="r nowrap">${btn('open', p.id, 'Add a need', 'ghost')} ${btn('exit', p.id, 'Exit', 'green', 'door')}</td></tr>`).join('')}</tbody></table></div></section>` : ''}
           ${shiftPanel(t)}
           <section class="panel"><div class="ph"><h3>${ic('undo', 'tsky')}Left the area — last 12 h (${exited.length})</h3></div>
@@ -350,53 +377,66 @@
     },
 
     vitals: {
-      head: () => head('Vital Signs Monitoring', 'Each patient is due again by their CTAS level. Take the vital signs, then press Done. Most urgent at the top.',
+      head: () => head('Vital Signs Monitoring', 'Each patient is due again by their CTAS level. Take the vital signs, then press Done. Patient not in the waiting area when called? Press CNR. Most urgent at the top.',
         searchBox('vq', 'Search MRN, name…') + selectF('vctas', 'CTAS filter', [['', 'All CTAS'], ...D.CTAS.map(c => [c, c])])),
       body() {
         const s = st(), t = now();
         const rows = UI.lists().vit.filter(p => matches(p, UI.vs.vq) && (!UI.vs.vctas || p.ctas === UI.vs.vctas));
         return `<div class="panel flush"><div class="tw"><table class="big"><thead><tr><th>MRN</th><th>Name</th><th>CTAS</th><th>Every</th><th>Last taken</th><th>Next due</th><th class="r"></th></tr></thead><tbody>
           ${rows.map(p => { const v = p.workflows.vitals, tm = D.vitalsTiming(p, s, t); return `<tr class="${tm.state === 'overdue' || tm.state === 'continuous' ? 'row-red' : tm.state === 'dueSoon' ? 'row-amber' : ''}">
-            <td>${urnLink(p)}</td><td class="b">${nm(p)}<div class="hint">${esc(p.diagnosis)}</div></td><td>${ctasB(p.ctas)}</td><td class="mono">${tm.intervalMin ? tm.intervalMin + ' min' : esc(tm.label)}</td>
+            <td>${urnLink(p)}</td><td class="b">${nm(p)} ${cnrPill(p)}<div class="hint">${esc(p.diagnosis)}</div></td><td>${ctasB(p.ctas)}</td><td class="mono">${tm.intervalMin ? tm.intervalMin + ' min' : esc(tm.label)}</td>
             <td class="mono">${v.lastReassessment ? U.when(v.lastReassessment) : 'Not yet'}<div class="hint">${v.reassessments.length} taken</div></td><td>${timingB(tm)}</td>
-            <td class="r nowrap">${btn('reassess', p.id, 'Done', 'primary', 'check')} ${btn('open', p.id, '⋯', 'ghost')}</td></tr>`; }).join('') || empty(UI.vs.vq || UI.vs.vctas ? 'No patients match.' : 'No one is waiting for vital signs.', 7)}
+            <td class="r nowrap">${btn('reassess', p.id, 'Done', 'primary', 'check')} ${btn('cnr', p.id, 'CNR', 'ghost', 'phone')} ${btn('open', p.id, '⋯', 'ghost')}</td></tr>`; }).join('') || empty(UI.vs.vq || UI.vs.vctas ? 'No patients match.' : 'No one is waiting for vital signs.', 7)}
           </tbody></table></div></div>`;
       },
     },
 
     bed: {
-      head: () => head('Waiting for Bed', 'Who booked each bed and when, and how long the patient has waited. Assigning the bed takes the patient out of PulseED. Longest wait first.',
-        searchBox('bq', 'Search MRN, name, physician…')),
+      head: () => head('Waiting for Bed', 'Two steps. 1) Assign bed: the patient stays here, shown as "bed assigned". 2) Placed on bed: when the patient is moved, which takes them out of PulseED. Anyone can do either step.',
+        searchBox('bq', 'Search MRN, name, physician, bed…')),
       body() {
         const s = st(), t = now();
         const q = UI.vs.bq;
-        const rows = UI.lists().bed.filter(p => matches(p, q) || U.key(p.workflows.bed.bookedBy).includes(U.key(q)) || U.key(p.workflows.bed.specialty).includes(U.key(q)));
+        const hit = p => matches(p, q) || [p.workflows.bed.bookedBy, p.workflows.bed.specialty, p.workflows.bed.assignedBed].some(x => U.key(x).includes(U.key(q)));
+        const L = UI.lists();
+        const waiting = L.bedWaiting.filter(hit), toPlace = L.toPlace.filter(hit);
         const day = t - 24 * 3600000;
-        const assigned = Object.values(S.state.patients).filter(p => p.exit && p.exit.type === 'bed' && U.toMs(p.exit.time) >= day && (!q || matches(p, q)))
+        const placed = Object.values(S.state.patients).filter(p => p.exit && p.exit.type === 'bed' && U.toMs(p.exit.time) >= day && (!q || matches(p, q) || U.key(p.exit.bed).includes(U.key(q))))
           .sort((a, b) => U.toMs(b.exit.time) - U.toMs(a.exit.time));
-        return `<div class="panel flush"><div class="tw"><table class="big"><thead><tr><th>MRN</th><th>Name</th><th>Booked by</th><th>Booked at</th><th>Waiting</th><th>Specialty</th><th class="r"></th></tr></thead><tbody>
-          ${rows.map(p => { const b = p.workflows.bed, w = D.bedWait(p, s, t); return `<tr class="${w.level === 'red' ? 'row-red' : ''}">
-            <td>${urnLink(p)}</td><td class="b">${nm(p)}<div class="hint">${esc(p.ctas)} · ${esc(p.diagnosis)}</div></td><td class="b">${esc(b.bookedBy)}</td><td class="mono">${U.when(b.bookedAt)}</td><td>${waitB(w)}</td><td>${b.specialty ? pill(b.specialty, 'sky') : '<span class="hint">—</span>'}</td>
-            <td class="r nowrap">${btn('bed', p.id, 'Assign bed', 'green', 'bed')} ${btn('booking', p.id, 'Edit', 'ghost', 'edit')}</td></tr>`; }).join('') || empty(q ? 'No patients match.' : 'No one is waiting for a bed.', 7)}
-          </tbody></table></div></div>
-          <section class="panel flush"><div class="ph pad"><h3>${ic('check', 'tgreen')}Beds assigned — last 24 h (${assigned.length})</h3><span class="hint">Booking to assignment, for follow-up and reports.</span></div>
-            <div class="tw scroll"><table><thead><tr><th>MRN</th><th>Name</th><th>Booked by</th><th>Booked at</th><th>Bed assigned at</th><th>Bed</th><th>Total wait</th><th class="r"></th></tr></thead><tbody>
-            ${assigned.map(p => { const b = p.workflows.bed, bookedAt = b.bookedAt || p.createdAt; return `<tr><td>${urnLink(p)}</td><td>${nm(p)}</td><td>${esc(b.bookedBy || '—')}</td><td class="mono">${U.when(bookedAt)}</td><td class="mono">${U.when(p.exit.time)}</td><td class="b">${esc(p.exit.bed)}</td><td>${b.bookedAt ? waitB({ mins: U.minsBetween(b.bookedAt, p.exit.time), level: D.waitLevel(U.minsBetween(b.bookedAt, p.exit.time), s.bedWaitAmberMin, s.bedWaitRedMin) }) : '<span class="hint">no booking</span>'}</td><td class="r">${btn('reopen', p.id, 'Undo', 'ghost', 'undo')}</td></tr>`; }).join('') || empty('No beds assigned in the last 24 hours.', 8)}
+        return `<section class="panel flush"><div class="ph pad"><h3>${ic('bed', 'tamber')}1 · Waiting for a bed to be assigned (${waiting.length})</h3><span class="hint">Longest wait first.</span></div>
+          <div class="tw"><table class="big"><thead><tr><th>MRN</th><th>Name</th><th>Booked by</th><th>Booked at</th><th>Waiting</th><th>Specialty</th><th class="r"></th></tr></thead><tbody>
+          ${waiting.map(p => { const b = p.workflows.bed, w = D.bedWait(p, s, t); return `<tr class="${w.level === 'red' ? 'row-red' : ''}">
+            <td>${urnLink(p)}</td><td class="b">${nm(p)} ${cnrPill(p)}<div class="hint">${esc(p.ctas)} · ${esc(p.diagnosis)}</div></td><td class="b">${esc(b.bookedBy)}</td><td class="mono">${U.when(b.bookedAt)}</td><td>${waitB(w)}</td><td>${b.specialty ? pill(b.specialty, 'sky') : '<span class="hint">—</span>'}</td>
+            <td class="r nowrap">${btn('assign', p.id, 'Assign bed', 'green', 'bed')} ${btn('booking', p.id, 'Edit', 'ghost', 'edit')}</td></tr>`; }).join('') || empty(q ? 'No patients match.' : 'No one is waiting for a bed to be assigned.', 7)}
+          </tbody></table></div></section>
+          <section class="panel flush"><div class="ph pad"><h3>${ic('check', 'tgreen')}2 · Bed assigned — waiting to be placed (${toPlace.length})</h3><span class="hint">Press <b>Placed on bed</b> when the patient is moved. Longest since assignment first.</span></div>
+          <div class="tw"><table class="big"><thead><tr><th>MRN</th><th>Name</th><th>Bed assigned</th><th>Assigned at</th><th>Since assigned</th><th>Booked by</th><th>Bed wait</th><th class="r"></th></tr></thead><tbody>
+          ${toPlace.map(p => { const b = p.workflows.bed, w = D.placeWait(p, s, t); return `<tr class="${w.level === 'red' ? 'row-red' : ''}">
+            <td>${urnLink(p)}</td><td class="b">${nm(p)} ${cnrPill(p)}<div class="hint">${esc(p.ctas)} · ${esc(p.diagnosis)}</div></td><td><span class="pill green big">${esc(b.assignedBed)}</span></td><td class="mono">${U.when(b.assignedAt)}<div class="hint">by ${esc(b.assignedBy || '—')}</div></td><td>${waitB(w)}</td>
+            <td>${esc(b.bookedBy)}<div class="hint">${U.when(b.bookedAt)}</div></td><td>${waitB(D.bedWait(p, s, t))}</td>
+            <td class="r nowrap">${btn('place', p.id, 'Placed on bed', 'green', 'check')} ${btn('assign', p.id, 'Change bed', 'ghost', 'edit')}</td></tr>`; }).join('') || empty(q ? 'No patients match.' : 'No beds assigned and waiting.', 8)}
+          </tbody></table></div></section>
+          <section class="panel flush"><div class="ph pad"><h3>${ic('door', 'tsky')}Placed on bed — last 24 h (${placed.length})</h3><span class="hint">Booking → assignment → placement, for follow-up and reports.</span></div>
+            <div class="tw scroll"><table><thead><tr><th>MRN</th><th>Name</th><th>Booked by</th><th>Booked at</th><th>Assigned at</th><th>Placed at</th><th>Bed</th><th>Total wait</th><th class="r"></th></tr></thead><tbody>
+            ${placed.map(p => { const b = p.workflows.bed, total = b.bookedAt ? U.minsBetween(b.bookedAt, p.exit.time) : null; return `<tr><td>${urnLink(p)}</td><td>${nm(p)}</td><td>${esc(b.bookedBy || '—')}</td><td class="mono">${b.bookedAt ? U.when(b.bookedAt) : '—'}</td><td class="mono">${b.assignedAt ? U.when(b.assignedAt) : '—'}</td><td class="mono">${U.when(p.exit.time)}</td><td class="b">${esc(p.exit.bed)}</td><td>${total != null ? waitB({ mins: total, level: D.waitLevel(total, s.bedWaitAmberMin, s.bedWaitRedMin) }) : '<span class="hint">no booking</span>'}</td><td class="r">${btn('reopen', p.id, 'Undo', 'ghost', 'undo')}</td></tr>`; }).join('') || empty('Nobody placed on a bed in the last 24 hours.', 9)}
             </tbody></table></div></section>`;
       },
     },
 
     procedure: {
-      head: () => head('Procedure / Treatment / Imaging', 'What each patient is waiting for, how long, and where it is up to. "Done" or "Cancelled" closes it.',
+      head: () => head('Procedure / Treatment / Imaging', 'Every open order, one row each. A patient can have several at once (e.g. imaging and IV treatment). Start, Done or ⋯ to cancel or add another.',
         searchBox('pq', 'Search MRN, name, request…') + selectF('pkind', 'Type filter', [['', 'All types'], ...D.PROC_KINDS.map(x => [x, x])])),
       body() {
         const s = st(), t = now();
-        const rows = UI.lists().proc.filter(p => (matches(p, UI.vs.pq) || U.key(p.workflows.procedure.description).includes(U.key(UI.vs.pq))) && (!UI.vs.pkind || p.workflows.procedure.kind === UI.vs.pkind));
+        const rows = UI.lists().proc.reduce((out, p) => out.concat(D.openOrders(p).map(it => ({ p, it }))), [])
+          .filter(({ p, it }) => (matches(p, UI.vs.pq) || U.key(it.description).includes(U.key(UI.vs.pq))) && (!UI.vs.pkind || it.kind === UI.vs.pkind))
+          .sort((a, b) => U.toMs(a.it.requestTime) - U.toMs(b.it.requestTime));
+        const ob = (p, it, st, label, cls, icon) => `<button class="btn sm ${cls}" data-act="ostat" data-id="${esc(p.id + '|' + it.id + '|' + st)}">${ic(icon)}<span>${label}</span></button>`;
         return `<div class="panel flush"><div class="tw"><table class="big"><thead><tr><th>MRN</th><th>Name</th><th>Type</th><th>Request</th><th>Requested</th><th>Waiting</th><th>Status</th><th class="r"></th></tr></thead><tbody>
-          ${rows.map(p => { const r = p.workflows.procedure; return `<tr>
-            <td>${urnLink(p)}</td><td class="b">${nm(p)}<div class="hint">${esc(p.ctas)} · ${esc(p.diagnosis)}</div></td><td>${pill(r.kind, r.kind === 'Radiology Imaging' ? 'blue' : r.kind === 'Treatment' ? 'green' : 'sky')}</td><td class="b">${esc(r.description)}</td>
-            <td class="mono">${U.when(r.requestTime)}</td><td>${waitB(D.procWait(p, s, t))}</td><td>${pill(r.status, procTone(r.status))}</td>
-            <td class="r">${btn('proc', p.id, 'Update', 'ghost', 'edit')}</td></tr>`; }).join('') || empty(UI.vs.pq || UI.vs.pkind ? 'No patients match.' : 'Nothing waiting.', 8)}
+          ${rows.map(({ p, it }) => { const w = D.orderWait(it, s, t); return `<tr class="${w.level === 'red' ? 'row-red' : ''}">
+            <td>${urnLink(p)}</td><td class="b">${nm(p)} ${cnrPill(p)}<div class="hint">${esc(p.ctas)} · ${esc(p.diagnosis)}${D.openOrders(p).length > 1 ? ` · <b>${D.openOrders(p).length} orders</b>` : ''}</div></td><td>${pill(it.kind, kindTone(it.kind))}</td><td class="b">${esc(it.description)}</td>
+            <td class="mono">${U.when(it.requestTime)}</td><td>${waitB(w)}</td><td>${pill(it.status, procTone(it.status))}</td>
+            <td class="r nowrap">${it.status === 'Waiting' ? ob(p, it, 'In Progress', 'Start', 'ghost', 'clock') : ''} ${ob(p, it, 'Done', 'Done', 'primary', 'check')} <button class="btn sm ghost" data-act="proc" data-id="${esc(p.id)}" title="Cancel, change or add another order">⋯</button></td></tr>`; }).join('') || empty(UI.vs.pq || UI.vs.pkind ? 'No orders match.' : 'Nothing waiting.', 8)}
           </tbody></table></div></div>`;
       },
     },
@@ -411,13 +451,15 @@
           const w = p.workflows[k];
           if (!w.active) return '';
           if (k === 'vitals') { const tm = D.vitalsTiming(p, s, t); return `<span class="wf on t-${tm.state}" title="${esc(tm.label)}">${ic('heart')}${tm.state === 'overdue' ? 'Overdue' : 'Vitals'}</span>`; }
-          if (k === 'bed') return `<span class="wf on w-${D.bedWait(p, s, t).level}" title="Booked by ${esc(w.bookedBy)}">${ic('bed')}Bed ${U.dur(D.bedWait(p, s, t).mins)}</span>`;
-          return `<span class="wf on" title="${esc(w.description)}">${ic('syringe')}${esc(w.kind === 'Radiology Imaging' ? 'Imaging' : w.kind)}</span>`;
+          if (k === 'bed') return w.assignedBed ? `<span class="wf on w-${D.placeWait(p, s, t).level}" title="Bed assigned ${esc(U.t24(w.assignedAt))}; waiting to be placed">${ic('bed')}→ ${esc(w.assignedBed)}</span>`
+            : `<span class="wf on w-${D.bedWait(p, s, t).level}" title="Booked by ${esc(w.bookedBy)}">${ic('bed')}Bed ${U.dur(D.bedWait(p, s, t).mins)}</span>`;
+          const o = D.openOrders(p);
+          return `<span class="wf on" title="${esc(o.map(D.orderText).join('\n'))}">${ic('syringe')}${o.length > 1 ? o.length + ' orders' : esc(kindShort(o[0].kind))}</span>`;
         };
         return `<div class="panel flush"><div class="tw"><table class="big"><thead><tr><th>MRN</th><th>Name</th><th>CTAS</th><th>Chief complaint</th><th>Physician</th><th>In the area</th><th>Waiting for</th><th class="r"></th></tr></thead><tbody>
           ${rows.map(p => `<tr class="${p.ctas === 'CTAS 1' ? 'row-red' : !D.activeWfs(p).length ? 'row-amber' : ''}"><td>${urnLink(p)}</td><td class="b">${nm(p)}</td><td>${ctasB(p.ctas)}</td><td>${esc(p.diagnosis)}</td>
             <td>${esc(p.physician)}</td><td class="mono">${U.dur(U.minsBetween(p.createdAt, t))}<div class="hint">since ${U.t24(p.createdAt)}</div></td>
-            <td class="nowrap">${D.WF_KEYS.map(k => chip(p, k)).join(' ') || '<span class="tamber">Nothing open</span>'}</td><td class="r nowrap">${btn('open', p.id, 'Open', 'ghost', 'edit')} ${btn('exit', p.id, 'Exit', 'green', 'door')}</td></tr>`).join('') || empty('No one is in the reassessment area.', 8)}
+            <td class="nowrap">${D.WF_KEYS.map(k => chip(p, k)).join(' ') || '<span class="tamber">Nothing open</span>'} ${cnrPill(p)}</td><td class="r nowrap">${btn('open', p.id, 'Open', 'ghost', 'edit')} ${btn('exit', p.id, 'Exit', 'green', 'door')}</td></tr>`).join('') || empty('No one is in the reassessment area.', 8)}
           </tbody></table></div></div>`;
       },
     },
@@ -436,7 +478,8 @@
         return `
           <section class="metrics">
             ${kc('Bed wait', m.bedWait, 'min', 'Physician booked the bed → bed assigned')}
-            ${kc('Procedure / imaging time', m.procTat, 'min', 'Requested → marked Done')}
+            ${kc('Bed assigned → placed', m.placeWait, 'min', 'Bed assigned → patient moved onto it')}
+            ${kc('Procedure / imaging time', m.procTat, 'min', 'Each order: requested → marked Done')}
             <div class="panel kpi"><p>Vital signs on time</p><h3 class="${comp.pct != null && comp.pct < s.complianceTargetPct ? 'tred' : ''}">${comp.pct != null ? comp.pct + '%' : '—'}</h3><p class="mono">Hourly median: ${comp.median != null ? comp.median + '%' : '—'} · n=${comp.n} intervals</p><small class="${comp.pct != null && comp.pct >= s.complianceTargetPct ? 'tgreen' : ''}">Target ≥ ${s.complianceTargetPct}% · on time = within ${s.complianceGraceMin} min of due</small></div>
           </section>
           <section class="tri">
@@ -449,7 +492,7 @@
               <label class="check"><input type="checkbox" id="deid" ${UI.vs.deid !== false ? 'checked' : ''}> De-identify (initials instead of names)</label></div>
             <p class="hint">Exports contain patient information. Store them only in approved locations. Every export is recorded in the audit trail.</p>
             <div class="exports">
-              ${ex('x-master', 'Patients')}${ex('x-vitals', 'Vital signs')}${ex('x-bed', 'Bed bookings')}${ex('x-proc', 'Procedure / imaging')}${ex('x-audit', 'Audit trail', 'tgreen')}
+              ${ex('x-master', 'Patients')}${ex('x-vitals', 'Vital signs')}${ex('x-bed', 'Bed bookings')}${ex('x-proc', 'Procedure / imaging')}${ex('x-notes', 'Notes & CNR')}${ex('x-audit', 'Audit trail', 'tgreen')}
               <button class="export" data-act="x-backup">${ic('shield', 'tamber')}<span>Full backup (all data)</span><small>.JSON</small></button>
             </div>
           </section>`}`;
@@ -548,7 +591,7 @@
   const opt = (v, cur, label) => `<option value="${esc(v)}"${v === cur ? ' selected' : ''}>${esc(label || v)}</option>`;
   const sel = (name, options, cur, attrs = '') => `<select name="${name}" ${attrs}>${options.map(o => (Array.isArray(o) ? opt(o[0], cur, o[1]) : opt(o, cur))).join('')}</select>`;
   const inp = (name, val = '', attrs = '') => `<input name="${name}" value="${esc(val)}" ${attrs}>`;
-  const patientCard = p => `<div class="pcard"><div><b>${nm(p)}</b> <span class="mono tsky">${esc(p.urn)}</span> ${ctasB(p.ctas)}</div><div class="hint">${[p.diagnosis, p.physician, p.team, p.encounterId ? 'Enc ' + p.encounterId : ''].filter(x => x && x !== 'Unassigned').map(esc).join(' · ')}</div></div>`;
+  const patientCard = p => `<div class="pcard"><div><b>${nm(p)}</b> <span class="mono tsky">${esc(p.urn)}</span> ${ctasB(p.ctas)} ${cnrPill(p)}</div><div class="hint">${[p.diagnosis, p.physician, p.team, p.encounterId ? 'Enc ' + p.encounterId : ''].filter(x => x && x !== 'Unassigned').map(esc).join(' · ')}</div></div>`;
   const fresh = id => S.state.patients[id];
 
   /** Run a store action and report the result. */
@@ -636,8 +679,20 @@
     </div>`;
   const bookingFields = (b = {}) => `<div class="g2">${field('Bed booked by (physician) *', inp('bookedBy', b.bookedBy || '', 'list="dl-phys" maxlength="60" autocomplete="off" placeholder="e.g. Dr A. Khan"'), 'The booking time is recorded automatically.')}
     ${field('Specialty', inp('specialty', b.specialty || '', 'list="dl-spec" maxlength="60" placeholder="Optional"'))}</div>`;
-  const procFields = (r = {}) => `<div class="g3">${field('Type *', sel('kind', D.PROC_KINDS, r.kind || 'Procedure'))}
-    ${field('What is needed *', inp('description', r.description || '', 'list="dl-proc" maxlength="80" autocomplete="off" placeholder="e.g. CT Head, IV antibiotics, suturing"'), '', 'span2')}</div>`;
+  /** One row per order; "Add another" adds rows, so a patient can get imaging, treatment and a procedure at once. */
+  const orderRow = (i, o = {}) => `<div class="orow" data-orow>${sel('kind_' + i, D.PROC_KINDS, o.kind || 'Procedure', 'aria-label="Type"')}${inp('desc_' + i, o.description || '', 'list="dl-proc" maxlength="80" autocomplete="off" aria-label="What is needed" placeholder="What is needed, e.g. CT Head, IV antibiotics, suturing"')}<button type="button" class="ibtn" data-odel aria-label="Remove this order" title="Remove">${ic('x')}</button></div>`;
+  const orderFields = (title = 'Orders') => `<div class="f"><span>${title} * <small class="hint">one line each</small></span><div class="orders-in" data-orders>${orderRow(0)}</div>
+    <button type="button" class="btn sm ghost" data-oadd>${ic('plus')}<span>Add another (procedure, treatment or imaging)</span></button></div>`;
+  const bindOrders = form => {
+    let n = 1;
+    form.addEventListener('click', e => {
+      if (e.target.closest('[data-oadd]')) { const box = $('[data-orders]', form); box.insertAdjacentHTML('beforeend', orderRow(n++)); box.lastElementChild.querySelector('input').focus(); }
+      const del = e.target.closest('[data-odel]');
+      if (del) { if ($$('[data-orow]', form).length > 1) del.closest('[data-orow]').remove(); else del.closest('[data-orow]').querySelector('input').value = ''; }
+    });
+  };
+  const readOrders = form => $$('[data-orow]', form).map(r => ({ kind: r.querySelector('select').value, description: r.querySelector('input').value }));
+  const noteTypeSel = (name, cur, withCnr) => sel(name, Object.keys(D.NOTE_TYPES).filter(k => withCnr || k !== 'cnr').map(k => [k, D.NOTE_TYPES[k]]), cur || 'nursing');
 
   UI.newPatientModal = () => {
     const s = st();
@@ -652,19 +707,19 @@
         </div>
         <fieldset class="wfset"><legend>What is the patient waiting for? <small>Tick one or more</small></legend>${needPick()}</fieldset>
         <div class="sec" data-sec="wfBed" hidden>${bookingFields()}</div>
-        <div class="sec" data-sec="wfProc" hidden>${procFields()}</div>
+        <div class="sec" data-sec="wfProc" hidden>${orderFields('Procedure / treatment / imaging')}</div>
         <details class="more"><summary>More details (optional)</summary><div class="g3">
           ${field('Treating physician', inp('physician', '', 'maxlength="60" list="dl-phys" placeholder="If known"'))}
           ${field('Encounter number', inp('encounterId', '', 'maxlength="24" autocomplete="off"'))}
           ${field('ED team', sel('team', [['', '—'], ...s.teams], ''))}</div></details>`,
       onMount: (el, form) => {
         const sync = () => $$('[data-sec]', form).forEach(sx => (sx.hidden = !form.elements[sx.dataset.sec].checked));
-        form.addEventListener('change', sync); sync();
+        form.addEventListener('change', sync); sync(); bindOrders(form);
       },
       onSubmit: async (f, d) => {
         const res = await run('ADMIT', {
           urn: d.urn, encounterId: d.encounterId, name: d.name, diagnosis: d.diagnosis, ctas: d.ctas, physician: d.physician, team: d.team,
-          workflows: { vitals: d.wfVitals, bed: d.wfBed, procedure: d.wfProc }, bookedBy: d.bookedBy, specialty: d.specialty, kind: d.kind, description: d.description,
+          workflows: { vitals: d.wfVitals, bed: d.wfBed, procedure: d.wfProc }, bookedBy: d.bookedBy, specialty: d.specialty, orders: d.wfProc ? readOrders(f) : [],
         }, `${U.norm(d.urn).toUpperCase()} added to the reassessment area.`);
         if (res.patient && res.patient.ctas === 'CTAS 1') UI.toast('CTAS 1: move now to a resus bed, or any free monitored ED bed if resus is full.', 'error');
       },
@@ -672,22 +727,72 @@
   };
 
   // ------------------------------------------------------------------ modals: vital signs
-  UI.reassessModal = id => {
+  UI.reassessModal = (id, outcome) => {
     const p = fresh(id); if (!p) return;
     const s = st(), tm = D.vitalsTiming(p, s, now()), v = p.workflows.vitals;
     if (!v.active) { UI.toast(`${p.urn} is not on vital signs monitoring.`, 'warn'); return UI.patientModal(id); }
     const minT = Math.max(U.toMs(v.lastReassessment || v.startTime), now() - s.backdateMaxMin * 60000);
+    const c = D.cnrInfo(p, s, now());
     UI.modal({
-      title: `Vital signs done — ${esc(p.urn)}`, icon: 'heart', submit: 'Vital signs done',
+      title: `Vital signs — ${esc(p.urn)}`, icon: 'heart', submit: 'Vital signs done',
       body: `${patientCard(p)}
         <div class="kv"><span>Every</span><b>${tm.intervalMin ? `${tm.intervalMin} min` : esc(tm.label)}</b><span>Last</span><b>${v.lastReassessment ? U.when(v.lastReassessment) : 'Not yet (since ' + U.when(v.startTime) + ')'}</b><span>Status</span><b>${timingB(tm)}</b></div>
-        <p class="hint">Document the values in TrakCare as usual. This only records that they were taken and restarts the timer.</p>
-        <div class="g2">${field('Time taken', `<input type="datetime-local" name="time" value="${U.localInput(now())}" min="${U.localInput(minT)}" max="${U.localInput(now())}" required>`, `Can be back-dated up to ${s.backdateMaxMin} min.`)}
-        ${field('Note', inp('note', '', 'maxlength="200" placeholder="Optional"'))}</div>`,
+        ${c ? `<p class="note">${ic('phone')}<span>Called and not around ${c.count}× (last ${U.t24(c.at)}). Recording the vital signs clears the CNR.</span></p>` : ''}
+        <div class="seg big two" role="radiogroup" aria-label="Outcome">
+          <label><input type="radio" name="outcome" value="done" ${outcome !== 'cnr' ? 'checked' : ''}><span>${ic('check')} Vital signs done</span></label>
+          <label><input type="radio" name="outcome" value="cnr" ${outcome === 'cnr' ? 'checked' : ''}><span>${ic('phone')} Called — not around (CNR)</span></label></div>
+        <div data-for="done"><p class="hint">Document the values in TrakCare as usual. This records that they were taken and restarts the timer.</p>
+          <div class="g2">${field('Time taken', `<input type="datetime-local" name="time" value="${U.localInput(now())}" min="${U.localInput(minT)}" max="${U.localInput(now())}" required>`, `Can be back-dated up to ${s.backdateMaxMin} min.`)}
+          ${field('Note type', noteTypeSel('noteType', 'nursing', false))}</div>
+          ${field('Note', inp('note', '', 'maxlength="200" placeholder="Optional"'))}</div>
+        <div data-for="cnr"><p class="hint">${ic('phone')} The patient is shown on the dashboard as <b>CNR</b> so anyone can call again. A reminder sounds after ${s.cnrRecallMin || 10} min. The vital signs timer is not restarted.</p>
+          ${field('Note', inp('cnote', '', 'maxlength="200" placeholder="Optional, e.g. called twice in the waiting area, not at the toilets"'))}</div>`,
+      onMount: (el, form) => {
+        const sync = () => { const o = form.elements.outcome.value; $$('[data-for]', form).forEach(x => (x.hidden = x.dataset.for !== o)); form.querySelector('[type=submit]').textContent = o === 'cnr' ? 'Record CNR' : 'Vital signs done'; form.elements.time.required = o === 'done'; };
+        form.addEventListener('change', sync); sync();
+      },
       onSubmit: async (f, d) => {
+        if (d.outcome === 'cnr') return UI.recordCnr(id, d.cnote);
         // Left at the current minute = "now" (with seconds), so it is never earlier than a start a few seconds ago.
         const t = d.time && d.time !== U.localInput(now()) ? new Date(d.time).toISOString() : null;
-        await run('RECORD_REASSESSMENT', { id, time: t, note: d.note }, `Vital signs recorded for ${p.urn}; timer restarted.`);
+        await run('RECORD_REASSESSMENT', { id, time: t, note: d.note, noteType: d.noteType }, `Vital signs recorded for ${p.urn}; timer restarted.${p.cnr ? ' CNR cleared.' : ''}`);
+      },
+    });
+  };
+
+  /** Called, not around: one tap from any list. */
+  UI.recordCnr = async (id, text) => {
+    const p = fresh(id); if (!p) return;
+    const r = await run('ADD_NOTE', { id, type: 'cnr', text: text || '' }, `${p.urn}: CNR recorded (called, not around${p.cnr ? ', ' + (p.cnr.count + 1) + ' times' : ''}). Shown on the dashboard; call again in ${st().cnrRecallMin || 10} min.`);
+    return r;
+  };
+  /** The CNR patient is back: take the vital signs now, or just clear the flag. */
+  UI.foundModal = id => {
+    const p = fresh(id); if (!p) return;
+    if (!p.cnr) return UI.patientModal(id);
+    if (!p.workflows.vitals.active) return run('CLEAR_CNR', { id }, `${p.urn} found; CNR cleared.`).catch(e => UI.toast(e.message, 'error'));
+    const c = D.cnrInfo(p, st(), now());
+    UI.modal({
+      title: `Found — ${esc(p.urn)}`, icon: 'check', submit: 'Take vital signs now',
+      extraButtons: `<button type="button" class="btn ghost" data-back>Back in the area (vitals later)</button>`,
+      body: `${patientCard(p)}<p>Called and not around ${c.count}× (first ${U.t24(c.since)}, last ${U.t24(c.at)}). The patient is back in the waiting area.</p>`,
+      onMount: (el, form, m) => { $('[data-back]', el).onclick = async () => { try { await run('CLEAR_CNR', { id }, `${p.urn} found; CNR cleared.`); m.close(); } catch (e) { m.showError(e.message, e.code); } }; },
+      onSubmit: async () => { setTimeout(() => UI.reassessModal(id), 0); },
+    });
+  };
+
+  /** Notes with a type (nursing note, refused, escalated, CNR, …). */
+  UI.noteModal = (id, type) => {
+    const p = fresh(id); if (!p) return;
+    if (p.status !== 'active') return UI.toast(`${p.urn} has left the area.`, 'warn');
+    UI.modal({
+      title: `Add note — ${esc(p.urn)}`, icon: 'note', submit: 'Save note',
+      body: `${patientCard(p)}
+        ${field('Type', `<div class="chips">${Object.keys(D.NOTE_TYPES).map(k => `<label><input type="radio" name="type" value="${k}" ${k === (type || 'nursing') ? 'checked' : ''}><span>${esc(D.NOTE_TYPES[k])}</span></label>`).join('')}</div>`)}
+        ${field('Note', '<textarea name="text" rows="3" maxlength="500" autofocus></textarea>', 'Needed for every type except CNR. Notes appear in the patient record, the audit trail and the Notes export.')}`,
+      onSubmit: async (f, d) => {
+        if (d.type === 'cnr') return UI.recordCnr(id, d.text);
+        await run('ADD_NOTE', { id, type: d.type, text: d.text }, `Note added for ${p.urn}.`);
       },
     });
   };
@@ -697,24 +802,71 @@
     const b = p.workflows.bed;
     return `<div class="kv"><span>Booked by</span><b>${esc(b.bookedBy)}${b.specialty ? ' · ' + esc(b.specialty) : ''}</b><span>Booked at</span><b>${U.full(b.bookedAt)}</b><span>Waiting</span><b>${waitB(D.bedWait(p, st(), t))}</b></div>`;
   };
-  /** Assign the bed: the patient leaves PulseED. */
+  /** The bed button: step 1 (assign) if no bed is assigned yet, otherwise step 2 (placed on bed). */
   UI.bedModal = id => {
     const p = fresh(id); if (!p) return;
     if (p.status !== 'active') return UI.toast(`${p.urn} has already left the area.`, 'warn');
-    const b = p.workflows.bed;
+    return p.workflows.bed.active && p.workflows.bed.assignedBed ? UI.placeModal(id) : UI.assignModal(id);
+  };
+  /** Step 1: assign a bed. The patient stays in the area, shown as "bed assigned", until placed on it. */
+  UI.assignModal = id => {
+    const p = fresh(id); if (!p) return;
+    if (p.status !== 'active') return UI.toast(`${p.urn} has already left the area.`, 'warn');
+    const b = p.workflows.bed, change = b.active && b.assignedBed;
     UI.modal({
-      title: `Assign bed — ${esc(p.urn)}`, icon: 'bed', submit: 'Assign bed', tone: 'ok',
-      extraButtons: b.active ? `<button type="button" class="btn ghost" data-edit>${ic('edit')}Edit booking</button>` : '',
-      body: `${patientCard(p)}${b.active ? bookingCard(p, now()) : '<p class="hint">No bed booking was recorded for this patient; the bed can still be assigned.</p>'}
-        ${field('Bed *', inp('bed', '', 'required list="dl-bedsel" maxlength="40" autocomplete="off" placeholder="Start typing, e.g. Bed 12" autofocus'))}
+      title: `${change ? 'Change bed' : 'Assign bed'} — ${esc(p.urn)}`, icon: 'bed', submit: change ? 'Change bed' : 'Assign bed', tone: 'ok',
+      extraButtons: (b.active && !change ? `<button type="button" class="btn ghost" data-edit>${ic('edit')}Edit booking</button>` : '') + (change ? `<button type="button" class="btn ghost" data-unassign>Cancel assignment</button>` : `<button type="button" class="btn ghost" data-direct title="The patient is already on the bed: skip step 2">${ic('door')}Already placed</button>`),
+      body: `${patientCard(p)}${b.active ? bookingCard(p, now()) : `<p class="hint">No bed booking was recorded yet. Enter who booked it; the booking and assignment are recorded together.</p>${bookingFields()}`}
+        ${change ? `<div class="kv"><span>Assigned now</span><b>${pill(b.assignedBed, 'green')}</b><span>Since</span><b>${U.when(b.assignedAt)} by ${esc(b.assignedBy || '—')}</b></div>` : ''}
+        ${field(change ? 'New bed *' : 'Bed *', inp('bed', '', 'required list="dl-bedsel" maxlength="40" autocomplete="off" placeholder="Start typing, e.g. Resus, Bed 12" autofocus'), 'Any free bed can be used, e.g. any monitored bed when resus is full.')}
         ${field('Note', inp('note', '', 'maxlength="200" placeholder="Optional"'))}
-        <p class="hint">${ic('door')} The patient leaves PulseED: everything still open for them is closed and the assignment time is recorded.</p>`,
-      onMount: (el, form, m) => { const e = $('[data-edit]', el); if (e) e.onclick = () => { m.close(); UI.bookingModal(id); }; },
+        <p class="hint">${ic('bed')} <b>Step 1 of 2.</b> The patient stays in PulseED as <b>bed assigned</b>. When the patient is moved, press <b>Placed on bed</b>.</p>`,
+      onMount: (el, form, m) => {
+        const e = $('[data-edit]', el); if (e) e.onclick = () => { m.close(); UI.bookingModal(id); };
+        const u = $('[data-unassign]', el); if (u) u.onclick = () => { m.close(); UI.unassignModal(id); };
+        const dr = $('[data-direct]', el); if (dr) dr.onclick = async () => {
+          const d = Object.fromEntries(new FormData(form).entries());
+          try {
+            if (!b.active) await S.dispatch('START_WORKFLOW', { id, wf: 'bed', bookedBy: d.bookedBy, specialty: d.specialty });
+            await placeNow(p, d.bed, d.note); m.close();
+          } catch (ex) { m.showError(ex.message, ex.code); }
+        };
+      },
       onSubmit: async (f, d) => {
-        await run('EXIT', { id, type: 'bed', bed: d.bed, reason: d.note, expectedVersion: p.version }, `${p.urn}: bed ${U.norm(d.bed)} assigned. Patient has left the reassessment area.`,
-          { label: 'Undo', fn: () => run('REOPEN', { id, reason: 'Undo straight after assigning the bed' }, `${p.urn} is back in the reassessment area.`).catch(e => UI.toast(e.message, 'error')) });
+        await run('ASSIGN_BED', { id, bed: d.bed, note: d.note, bookedBy: d.bookedBy, specialty: d.specialty, expectedVersion: p.version },
+          `${p.urn}: ${U.norm(d.bed)} ${change ? 'is the new bed' : 'assigned'}. Press "Placed on bed" when the patient is moved.`,
+          change ? null : { label: 'Undo', fn: () => run('UNASSIGN_BED', { id, reason: 'Undo straight after assigning the bed.' }, `Bed assignment undone for ${p.urn}.`).catch(e => UI.toast(e.message, 'error')) });
       },
     });
+  };
+  const placeNow = (p, bed, note) => run('EXIT', { id: p.id, type: 'bed', bed, reason: note }, `${p.urn}: placed on ${U.norm(bed) || p.workflows.bed.assignedBed}. Patient has left the reassessment area.`,
+    { label: 'Undo', fn: () => run('REOPEN', { id: p.id, reason: 'Undo straight after placing on the bed' }, `${p.urn} is back in the reassessment area.`).catch(e => UI.toast(e.message, 'error')) });
+  /** Step 2: the patient is moved onto the assigned bed and leaves PulseED. */
+  UI.placeModal = id => {
+    const p = fresh(id); if (!p) return;
+    if (p.status !== 'active') return UI.toast(`${p.urn} has already left the area.`, 'warn');
+    const b = p.workflows.bed;
+    if (!b.active || !b.assignedBed) return UI.assignModal(id);
+    UI.modal({
+      title: `Placed on bed — ${esc(p.urn)}`, icon: 'check', submit: 'Placed on bed', tone: 'ok',
+      extraButtons: `<button type="button" class="btn ghost" data-change>${ic('edit')}Change bed</button><button type="button" class="btn ghost" data-unassign>Cancel assignment</button>`,
+      body: `${patientCard(p)}
+        <div class="kv"><span>Bed assigned</span><b>${pill(b.assignedBed, 'green')}</b><span>Assigned</span><b>${U.when(b.assignedAt)} by ${esc(b.assignedBy || '—')} · ${waitB(D.placeWait(p, st(), now()))} ago</b>
+          <span>Booked by</span><b>${esc(b.bookedBy)} at ${U.t24(b.bookedAt)}</b></div>
+        ${field('Bed the patient is on', inp('bed', b.assignedBed, 'required list="dl-bedsel" maxlength="40" autocomplete="off"'), 'Change it only if the patient went to a different bed.')}
+        ${field('Note', inp('note', '', 'maxlength="200" placeholder="Optional"'))}
+        <p class="hint">${ic('door')} <b>Step 2 of 2.</b> The patient leaves PulseED: everything still open for them is closed and the placement time is recorded.</p>`,
+      onMount: (el, form, m) => {
+        $('[data-change]', el).onclick = () => { m.close(); UI.assignModal(id); };
+        $('[data-unassign]', el).onclick = () => { m.close(); UI.unassignModal(id); };
+      },
+      onSubmit: async (f, d) => { await placeNow(p, d.bed, d.note); },
+    });
+  };
+  UI.unassignModal = id => {
+    const p = fresh(id); if (!p) return;
+    UI.reasonModal(`Cancel bed assignment — ${esc(p.urn)} (${esc(p.workflows.bed.assignedBed || '')})`, 'Why is the bed no longer assigned?',
+      reason => run('UNASSIGN_BED', { id, reason }, `${p.urn}: bed assignment cancelled; back to waiting for a bed.`));
   };
   UI.bookingModal = id => {
     const p = fresh(id); if (!p) return;
@@ -730,18 +882,38 @@
   };
 
   // ------------------------------------------------------------------ modals: procedure / treatment / imaging
-  UI.procModal = id => {
+  UI.procModal = (id, itemId) => {
     const p = fresh(id); if (!p) return;
-    const r = p.workflows.procedure;
-    if (!r.active) { UI.toast(`${p.urn} has nothing open for procedure / imaging.`, 'warn'); return UI.patientModal(id); }
+    if (p.status !== 'active') return UI.toast(`${p.urn} has left the area.`, 'warn');
+    const s = st(), t = now();
+    const items = (p.workflows.procedure.items || []).slice().sort((a, b) => (D.isOpenOrder(b) - D.isOpenOrder(a)) || U.toMs(b.requestTime) - U.toMs(a.requestTime));
+    const row = it => `<div class="order ${D.isOpenOrder(it) ? 'open' : 'closed'} ${it.id === itemId ? 'flash' : ''}">
+        <div class="ot">${pill(it.kind, kindTone(it.kind))}<b>${esc(it.description)}</b>${pill(it.status, procTone(it.status))}</div>
+        <div class="hint">Requested ${U.when(it.requestTime)}${it.by ? ' by ' + esc(it.by) : ''} · ${D.isOpenOrder(it) ? 'waiting ' + U.dur(D.orderWait(it, s, t).mins) : esc(it.endReason || it.status) + (it.endTime ? ' ' + U.when(it.endTime) : '')}</div>
+        ${D.isOpenOrder(it) ? `<div class="row">${it.status === 'Waiting' ? `<button type="button" class="btn sm ghost" data-ost="In Progress" data-item="${esc(it.id)}">${ic('clock')}Start</button>` : `<button type="button" class="btn sm ghost" data-ost="Waiting" data-item="${esc(it.id)}">Back to waiting</button>`}
+          <button type="button" class="btn sm primary" data-ost="Done" data-item="${esc(it.id)}">${ic('check')}Done</button><button type="button" class="btn sm ghost" data-ost="Cancelled" data-item="${esc(it.id)}">Cancel…</button></div>` : ''}</div>`;
+    const open = items.filter(D.isOpenOrder), closed = items.filter(x => !D.isOpenOrder(x)).slice(0, 6);
     UI.modal({
-      title: `${esc(r.kind)} — ${esc(p.urn)}`, icon: 'syringe', submit: 'Save',
+      title: `Procedure / treatment / imaging — ${esc(p.urn)}`, icon: 'syringe', wide: true, submit: 'Add order(s)',
       body: `${patientCard(p)}
-        <div class="kv"><span>Requested</span><b>${U.when(r.requestTime)}</b><span>Waiting</span><b>${waitB(D.procWait(p, st(), now()))}</b></div>
-        ${procFields(r)}
-        ${field('Status', `<div class="seg big" role="radiogroup">${D.PROC_STATUS.map(x => `<label><input type="radio" name="status" value="${esc(x)}" ${x === r.status ? 'checked' : ''}><span>${esc(x)}</span></label>`).join('')}</div>`)}
-        ${field('Note', inp('note', '', 'maxlength="200"'), 'Needed for Cancelled. Done or Cancelled closes it.')}`,
-      onSubmit: async (f, d) => { await run('UPDATE_PROCEDURE', { id, kind: d.kind, description: d.description, status: d.status, note: d.note, expectedVersion: p.version }, `${p.urn}: ${d.status}.`); },
+        <h4 class="sh">Open (${open.length})</h4><div class="orders">${open.map(row).join('') || '<p class="hint">Nothing open.</p>'}</div>
+        ${closed.length ? `<details class="more"><summary>Closed (${closed.length})</summary><div class="orders">${closed.map(row).join('')}</div></details>` : ''}
+        <h4 class="sh">Add more</h4>${orderFields('New orders')}`,
+      onMount: (el, form, m) => {
+        bindOrders(form);
+        el.addEventListener('click', async e => {
+          const b = e.target.closest('[data-ost]'); if (!b) return;
+          const status = b.dataset.ost, item = b.dataset.item, it = items.find(x => x.id === item);
+          const go = async note => { await run('UPDATE_PROCEDURE', { id, itemId: item, status, note }, `${p.urn}: ${it.description} — ${status}.`); m.close(); if (D.openOrders(fresh(id)).length) UI.procModal(id); };
+          if (status === 'Cancelled') { m.close(); return UI.reasonModal(`Cancel ${esc(it.description)} — ${esc(p.urn)}`, 'Why is it cancelled?', note => go(note)); }
+          try { await go(''); } catch (ex) { m.showError(ex.message, ex.code); }
+        });
+      },
+      onSubmit: async f => {
+        const orders = readOrders(f).filter(o => U.norm(o.description));
+        if (!orders.length) throw new D.RuleError('Type what is needed in the new order line, or press Cancel to close.');
+        await run('ADD_ORDER', { id, orders }, `${orders.length} order${orders.length > 1 ? 's' : ''} added for ${p.urn}.`);
+      },
     });
   };
 
@@ -750,13 +922,13 @@
     const p = fresh(id); if (!p) return;
     if (p.status !== 'active') return UI.toast(`${p.urn} has already left the area.`, 'warn');
     const wfs = D.activeWfs(p);
-    const def = type || (p.workflows.bed.active ? 'bed' : 'discharged');
+    const def = type || (p.workflows.bed.active && p.workflows.bed.assignedBed ? 'bed' : 'discharged');
     const opt3 = (v, icon, title, small) => `<label class="np ${v === 'bed' ? 'green' : v === 'discharged' ? 'sky' : 'grey'}"><input type="radio" name="type" value="${v}" ${v === def ? 'checked' : ''}>${ic(icon)}<b>${title}</b><small>${small}</small></label>`;
     UI.modal({
       title: `Patient leaving — ${esc(p.urn)}`, icon: 'door', submit: 'Confirm exit',
       body: `${patientCard(p)}
-        <div class="needpick">${opt3('bed', 'bed', 'Bed assigned', 'Moved to an ED bed')}${opt3('discharged', 'door', 'Discharged', 'Home, DAMA, absconded, LWBS…')}${opt3('error', 'x', 'Entered in error', 'Wrong patient or duplicate')}</div>
-        <div data-for="bed">${field('Bed *', inp('bed', '', 'list="dl-bedsel" maxlength="40" autocomplete="off" placeholder="Start typing, e.g. Bed 12"'))}</div>
+        <div class="needpick">${opt3('bed', 'bed', 'Placed on bed', 'Moved onto an ED bed')}${opt3('discharged', 'door', 'Discharged', 'Home, DAMA, absconded, LWBS…')}${opt3('error', 'x', 'Entered in error', 'Wrong patient or duplicate')}</div>
+        <div data-for="bed">${field('Bed *', inp('bed', (p.workflows.bed.active && p.workflows.bed.assignedBed) || '', 'list="dl-bedsel" maxlength="40" autocomplete="off" placeholder="Start typing, e.g. Bed 12"'), p.workflows.bed.assignedBed ? 'The assigned bed; change it if the patient went elsewhere.' : '')}</div>
         <div data-for="discharged">${field('Reason *', `<div class="chips">${D.DISCHARGE_REASONS.map((r, i) => `<label><input type="radio" name="dreason" value="${esc(r)}" ${i === 0 ? 'checked' : ''}><span>${esc(r)}</span></label>`).join('')}<label><input type="radio" name="dreason" value="__other"><span>Other…</span></label></div>`)}
           <div data-other hidden>${field('Type the reason *', inp('dother', '', 'maxlength="120" autocomplete="off"'))}</div></div>
         <div data-for="error">${field('What was wrong? *', inp('ereason', '', 'maxlength="200" autocomplete="off" placeholder="e.g. duplicate entry"'))}</div>
@@ -772,7 +944,7 @@
       onSubmit: async (f, d) => {
         const reason = d.type === 'discharged' ? (d.dreason === '__other' ? U.norm(d.dother) : d.dreason) : d.type === 'error' ? d.ereason : '';
         await run('EXIT', { id, type: d.type, bed: d.bed, reason, expectedVersion: p.version },
-          d.type === 'bed' ? `${p.urn}: bed ${U.norm(d.bed)} assigned. Patient has left the area.` : d.type === 'discharged' ? `${p.urn} discharged — ${reason}.` : `${p.urn} removed (entered in error).`,
+          d.type === 'bed' ? `${p.urn}: placed on ${U.norm(d.bed)}. Patient has left the area.` : d.type === 'discharged' ? `${p.urn} discharged — ${reason}.` : `${p.urn} removed (entered in error).`,
           { label: 'Undo', fn: () => run('REOPEN', { id, reason: 'Undo straight after the exit' }, `${p.urn} is back in the reassessment area.`).catch(e => UI.toast(e.message, 'error')) });
       },
     });
@@ -799,10 +971,13 @@
       const w = p.workflows[k];
       let info = '';
       if (k === 'vitals' && w.startTime) info = w.active ? `${timingB(D.vitalsTiming(p, s, t))}<div class="hint">${w.reassessments.length} taken since ${U.when(w.startTime)}</div>` : `<div class="hint">Closed ${U.when(w.endTime)} — ${esc(w.endReason)}</div>`;
-      if (k === 'bed' && w.bookedAt) info = w.active ? `${waitB(D.bedWait(p, s, t))}<div class="hint">Booked by ${esc(w.bookedBy)} at ${U.t24(w.bookedAt)}${w.specialty ? ' · ' + esc(w.specialty) : ''}</div>` : `<div class="hint">${w.assignedBed ? `Bed ${esc(w.assignedBed)} assigned ${U.when(w.assignedAt)} (booked ${U.t24(w.bookedAt)} by ${esc(w.bookedBy)})` : 'Closed ' + U.when(w.endTime) + ' — ' + esc(w.endReason)}</div>`;
-      if (k === 'procedure' && w.requestTime) info = w.active ? `${pill(w.status, procTone(w.status))}<div class="hint">${esc(w.kind)}: ${esc(w.description)}</div>` : `<div class="hint">${esc(w.kind)}: ${esc(w.description)} — ${esc(w.endReason || w.status)}</div>`;
+      if (k === 'bed' && w.bookedAt) info = w.active
+        ? (w.assignedBed ? `${pill('Bed assigned: ' + w.assignedBed, 'green')} ${waitB(D.placeWait(p, s, t))}<div class="hint">Assigned ${U.t24(w.assignedAt)} by ${esc(w.assignedBy || '—')} · waiting to be placed. Booked by ${esc(w.bookedBy)} at ${U.t24(w.bookedAt)}</div>`
+          : `${waitB(D.bedWait(p, s, t))}<div class="hint">Booked by ${esc(w.bookedBy)} at ${U.t24(w.bookedAt)}${w.specialty ? ' · ' + esc(w.specialty) : ''}</div>`)
+        : `<div class="hint">${w.placedAt ? `Placed on ${esc(w.assignedBed)} ${U.when(w.placedAt)} (booked ${U.t24(w.bookedAt)} by ${esc(w.bookedBy)})` : 'Closed ' + U.when(w.endTime) + ' — ' + esc(w.endReason)}</div>`;
+      if (k === 'procedure' && (w.items || []).length) { const o = D.openOrders(p); info = w.active ? o.map(it => `<div class="ordl">${pill(it.status, procTone(it.status))} ${esc(kindShort(it.kind))}: ${esc(it.description)}</div>`).join('') : `<div class="hint">${w.items.length} order${w.items.length > 1 ? 's' : ''}, all closed</div>`; }
       const acts = !act ? '' : w.active
-        ? `${k === 'vitals' ? `<button type="button" class="btn sm primary" data-do="reassess">Done</button>` : k === 'bed' ? `<button type="button" class="btn sm green" data-do="bed">Assign bed</button><button type="button" class="btn sm ghost" data-do="booking">Edit</button>` : `<button type="button" class="btn sm ghost" data-do="proc">Update</button>`} <button type="button" class="btn sm ghost" data-stop="${k}">Close</button>`
+        ? `${k === 'vitals' ? `<button type="button" class="btn sm primary" data-do="reassess">Done</button><button type="button" class="btn sm ghost" data-do="cnr">CNR</button>` : k === 'bed' ? (w.assignedBed ? `<button type="button" class="btn sm green" data-do="place">Placed on bed</button><button type="button" class="btn sm ghost" data-do="assign">Change</button>` : `<button type="button" class="btn sm green" data-do="assign">Assign bed</button><button type="button" class="btn sm ghost" data-do="booking">Edit</button>`) : `<button type="button" class="btn sm ghost" data-do="proc">Update / add</button>`} <button type="button" class="btn sm ghost" data-stop="${k}">Close</button>`
         : `<button type="button" class="btn sm ghost" data-start="${k}">${ic('plus')}Add</button>`;
       return `<div class="wfcard ${w.active ? 'on' : ''}"><div class="wfh">${ic(k === 'vitals' ? 'heart' : k === 'bed' ? 'bed' : 'syringe')}<b>${D.WF[k]}</b><span class="grow"></span>${acts}</div>${info || '<div class="hint">Not needed</div>'}</div>`;
     };
@@ -810,7 +985,10 @@
       title: `${esc(p.urn)} — ${nm(p)}${act ? '' : ' (left the area)'}`, icon: 'users', wide: true, submit: 'Save details',
       extraButtons: act ? `<button type="button" class="btn green" data-do="exit">${ic('door')}Patient leaving</button>` : `<button type="button" class="btn ghost" data-do="reopen">${ic('undo')}Undo exit</button>`,
       body: `${act ? '' : `<div class="note">${ic('door')} Left ${U.full(p.exit.time)} — ${esc(D.exitText(p.exit))} · by ${esc(p.exit.by)}</div>`}
+        ${act && p.cnr ? `<div class="note warnn">${ic('phone')}<span><b>CNR — called, not around ${p.cnr.count}×</b> (last ${U.t24(p.cnr.at)} by ${esc(p.cnr.by)}). Call again; press Found when the patient is back.</span><button type="button" class="btn sm green" data-do="found">Found</button></div>` : ''}
         <h4 class="sh">Waiting for</h4><div class="g3">${D.WF_KEYS.map(wfCard).join('')}</div>
+        <h4 class="sh">Notes (${(p.notes || []).length})${act ? ` <button type="button" class="btn sm ghost" data-do="note">${ic('plus')}Add note</button>` : ''}</h4>
+        <div class="notelist">${(p.notes || []).slice().reverse().slice(0, 8).map(n => `<div class="nrow">${pill(D.NOTE_TYPES[n.type] || n.type, n.type === 'cnr' ? 'amber' : n.type === 'escalated' || n.type === 'refused' ? 'red' : 'sky')}<span class="mono">${U.when(n.at)}</span><span>${esc(n.text || '')}</span><small>${esc(n.by)}</small></div>`).join('') || '<p class="hint">No notes yet.</p>'}</div>
         <fieldset ${act ? '' : 'disabled'}><div class="g3">
           ${field('Name', inp('name', p.name, 'maxlength="80" required'))}
           ${field('CTAS (re-triage)', sel('ctas', D.CTAS, p.ctas), 'Upgrade if the patient deteriorates; any free monitored bed can be used.')}
@@ -825,7 +1003,7 @@
         if (!act) { const sb = form.querySelector('[type=submit]'); sb.hidden = true; }
         el.addEventListener('click', e => {
           const go = e.target.closest('[data-do]'), start = e.target.closest('[data-start]'), stop = e.target.closest('[data-stop]');
-          if (go) { m.close(); ({ reassess: UI.reassessModal, bed: UI.bedModal, booking: UI.bookingModal, proc: UI.procModal, exit: UI.exitModal, reopen: UI.reopenModal })[go.dataset.do](id); }
+          if (go) { m.close(); ({ reassess: UI.reassessModal, bed: UI.bedModal, assign: UI.assignModal, place: UI.placeModal, booking: UI.bookingModal, proc: UI.procModal, exit: UI.exitModal, reopen: UI.reopenModal, note: UI.noteModal, found: UI.foundModal, cnr: x => UI.reassessModal(x, 'cnr') })[go.dataset.do](id); }
           if (start) { m.close(); UI.startWfModal(id, start.dataset.start); }
           if (stop) { m.close(); UI.reasonModal(`Close ${D.WF[stop.dataset.stop]} — ${esc(p.urn)}`, 'Why is it no longer needed?', reason => run('STOP_WORKFLOW', { id, wf: stop.dataset.stop, reason, expectedVersion: p.version }, `${D.WF[stop.dataset.stop]} closed for ${p.urn}.`)); }
         });
@@ -842,9 +1020,10 @@
     const p = fresh(id); if (!p) return;
     const body = wf === 'vitals'
       ? `${patientCard(p)}<p>Vital signs ${st().ctasIntervals[p.ctas] === 0 || p.ctas === 'CTAS 1' ? 'continuously' : st().ctasIntervals[p.ctas] ? 'every ' + st().ctasIntervals[p.ctas] + ' min' : '(no timer for this CTAS)'} for ${esc(p.ctas)}. The first set is due one interval from now.</p>`
-      : wf === 'bed' ? `${patientCard(p)}${bookingFields()}` : `${patientCard(p)}${procFields()}`;
+      : wf === 'bed' ? `${patientCard(p)}${bookingFields()}` : `${patientCard(p)}${orderFields('Procedure / treatment / imaging')}`;
     UI.modal({ title: `Add ${D.WF[wf]} — ${esc(p.urn)}`, icon: 'plus', submit: wf === 'bed' ? 'Book bed' : 'Add', body,
-      onSubmit: async (f, d) => { await run('START_WORKFLOW', Object.assign({ id, wf, expectedVersion: p.version }, d), `${D.WF[wf]} added for ${p.urn}.`); } });
+      onMount: (el, form) => { if (wf === 'procedure') bindOrders(form); },
+      onSubmit: async (f, d) => { await run('START_WORKFLOW', Object.assign({ id, wf, expectedVersion: p.version }, d, wf === 'procedure' ? { orders: readOrders(f) } : {}), `${D.WF[wf]} added for ${p.urn}.`); } });
   };
 
   // ------------------------------------------------------------------ modal: SBAR handoff
@@ -1055,6 +1234,8 @@
       <section class="panel"><h3>Wait-time thresholds &amp; alerts</h3><div class="g4">
         ${num('bedWaitAmberMin', s.bedWaitAmberMin, 1, 1440, 'Bed wait amber (min)', 'From the booking time')}${num('bedWaitRedMin', s.bedWaitRedMin, 1, 1440, 'Bed wait red (min)', 'Shown as an alert')}
         ${num('procWaitAmberMin', s.procWaitAmberMin, 1, 1440, 'Procedure / imaging amber (min)')}${num('procWaitRedMin', s.procWaitRedMin, 1, 1440, 'Procedure / imaging red (min)')}
+        ${num('placeWaitAmberMin', s.placeWaitAmberMin || 20, 1, 1440, 'Bed assigned, not placed: amber (min)')}${num('placeWaitRedMin', s.placeWaitRedMin || 45, 1, 1440, 'Bed assigned, not placed: red (min)', 'Shown as an alert, with sound')}
+        ${num('cnrRecallMin', s.cnrRecallMin || 10, 1, 120, 'CNR: call again after (min)', 'Soft sound and alert when it is time')}
         ${num('chimeRepeatMin', s.chimeRepeatMin, 1, 30, 'Repeat overdue / CTAS 1 sound every (min)')}${num('longWaitRepeatMin', s.longWaitRepeatMin || 15, 1, 120, 'Repeat long-wait sound every (min)', 'Bed or procedure past its red limit')}${num('autoLockMin', s.autoLockMin, 0, 240, 'Auto-lock after inactivity (min)', '0 = never (not recommended)')}
         ${num('exitedRetentionHours', s.exitedRetentionHours, 24, 2160, 'Keep exited patients (h)')}${num('eventRetentionHours', s.eventRetentionHours, 24, 8760, 'Keep audit events on this PC (h)')}
       </div></section>
@@ -1099,10 +1280,10 @@
         next.siteName = U.norm(d.siteName) || 'Emergency Department';
         next.stationName = U.norm(d.stationName) || 'Reassessment Area';
         ['2', '3', '4', '5'].forEach(c => { const v = n('iv_' + c); if (v < 1 || v > 480) throw new D.RuleError(`CTAS ${c} interval must be 1–480 min.`); next.ctasIntervals['CTAS ' + c] = v; });
-        ['dueSoonMaxMin', 'backdateMaxMin', 'complianceTargetPct', 'bedWaitAmberMin', 'bedWaitRedMin', 'procWaitAmberMin', 'procWaitRedMin', 'chimeRepeatMin', 'longWaitRepeatMin', 'autoLockMin', 'exitedRetentionHours', 'eventRetentionHours'].forEach(k => (next[k] = n(k)));
+        ['dueSoonMaxMin', 'backdateMaxMin', 'complianceTargetPct', 'bedWaitAmberMin', 'bedWaitRedMin', 'procWaitAmberMin', 'procWaitRedMin', 'placeWaitAmberMin', 'placeWaitRedMin', 'cnrRecallMin', 'chimeRepeatMin', 'longWaitRepeatMin', 'autoLockMin', 'exitedRetentionHours', 'eventRetentionHours'].forEach(k => (next[k] = n(k)));
         next.physicians = U.uniq(U.lines(d.physicians));
         next.dueSoonFraction = n('dueSoonPct') / 100;
-        if (next.bedWaitAmberMin >= next.bedWaitRedMin || next.procWaitAmberMin >= next.procWaitRedMin) throw new D.RuleError('Amber thresholds must be lower than red thresholds.');
+        if (next.bedWaitAmberMin >= next.bedWaitRedMin || next.procWaitAmberMin >= next.procWaitRedMin || next.placeWaitAmberMin >= next.placeWaitRedMin) throw new D.RuleError('Amber thresholds must be lower than red thresholds.');
         ['teams', 'specialties', 'procedures', 'beds'].forEach(k => { const l = U.uniq(U.lines(d[k])); if (!l.length) throw new D.RuleError(`The ${k} list cannot be empty.`); next[k] = l; });
         await S.saveSettings(next);
         UI._forceSettings = true; UI.refresh();
@@ -1119,13 +1300,14 @@
     const deid = UI.vs.deid !== false;
     const all = Object.values(S.state.patients);
     const f = U.full;
-    const eps = key => { const out = []; all.forEach(p => { (p.pastEpisodes || []).filter(e => e.wf === key).forEach(e => out.push([p, e])); const w = p.workflows[key]; if (w && (w.startTime || w.bookedAt || w.requestTime)) out.push([p, w]); }); return out; };
+    const eps = key => { const out = []; all.forEach(p => { (p.pastEpisodes || []).filter(e => e.wf === key).forEach(e => out.push([p, e])); const w = p.workflows[key]; if (w && (w.startTime || w.bookedAt)) out.push([p, w]); }); return out; };
     let name, csv;
     if (kind === 'x-master') { name = 'Patients'; csv = U.csv(['MRN', 'Encounter', 'Name', 'CTAS', 'ChiefComplaint', 'Physician', 'Team', 'Status', 'AddedAt', 'AddedBy', 'Exit', 'ExitReason', 'ExitTime', 'Bed', 'ExitBy', 'MinsInArea'],
       all.map(p => [p.urn, p.encounterId, dn(p, deid), p.ctas, p.diagnosis, p.physician, p.team, p.status === 'active' ? 'In the area' : 'Left', f(p.createdAt), p.createdBy, p.exit ? p.exit.label : '', p.exit ? p.exit.reason : '', p.exit ? f(p.exit.time) : '', p.exit ? p.exit.bed || '' : '', p.exit ? p.exit.by : '', U.minsBetween(p.createdAt, p.exit ? p.exit.time : now())])); }
     if (kind === 'x-vitals') { name = 'Vital_Signs'; csv = U.csv(['MRN', 'Encounter', 'Name', 'CTAS', 'StartTime', 'LastReassessment', 'ReassessmentCount', 'ReassessmentTimes', 'Active', 'EndTime', 'EndReason'], eps('vitals').map(([p, v]) => [p.urn, p.encounterId, dn(p, deid), v.ctas || p.ctas, f(v.startTime), f(v.lastReassessment), (v.reassessments || []).length, (v.reassessments || []).map(U.t24).join(' '), v.active, f(v.endTime), v.endReason])); }
-    if (kind === 'x-bed') { name = 'Bed_Bookings'; csv = U.csv(['MRN', 'Encounter', 'Name', 'ChiefComplaint', 'BookedBy', 'Specialty', 'BookedAt', 'BedAssigned', 'AssignedAt', 'MinsBookedToAssigned', 'Open', 'EndReason'], eps('bed').map(([p, b]) => [p.urn, p.encounterId, dn(p, deid), p.diagnosis, b.bookedBy, b.specialty, f(b.bookedAt), b.assignedBed, f(b.assignedAt), b.assignedAt ? U.minsBetween(b.bookedAt, b.assignedAt) : '', b.active, b.endReason])); }
-    if (kind === 'x-proc') { name = 'Procedure_Imaging'; csv = U.csv(['MRN', 'Encounter', 'Name', 'Type', 'Request', 'Status', 'RequestedAt', 'DoneAt', 'MinsToDone', 'Open', 'EndReason'], eps('procedure').map(([p, r]) => [p.urn, p.encounterId, dn(p, deid), r.kind, r.description, r.status, f(r.requestTime), f(r.completionTime), r.completionTime ? U.minsBetween(r.requestTime, r.completionTime) : '', r.active, r.endReason])); }
+    if (kind === 'x-bed') { name = 'Bed_Bookings'; csv = U.csv(['MRN', 'Encounter', 'Name', 'ChiefComplaint', 'BookedBy', 'Specialty', 'BookedAt', 'BedAssigned', 'AssignedAt', 'AssignedBy', 'PlacedAt', 'MinsBookedToAssigned', 'MinsAssignedToPlaced', 'Open', 'EndReason'], eps('bed').map(([p, b]) => [p.urn, p.encounterId, dn(p, deid), p.diagnosis, b.bookedBy, b.specialty, f(b.bookedAt), b.assignedBed, f(b.assignedAt), b.assignedBy || '', f(b.placedAt), b.assignedAt ? U.minsBetween(b.bookedAt, b.assignedAt) : '', b.placedAt && b.assignedAt ? U.minsBetween(b.assignedAt, b.placedAt) : '', b.active, b.endReason])); }
+    if (kind === 'x-proc') { name = 'Procedure_Imaging'; csv = U.csv(['MRN', 'Encounter', 'Name', 'Type', 'Request', 'Status', 'RequestedAt', 'RequestedBy', 'StartedAt', 'DoneAt', 'MinsToDone', 'Open', 'EndReason'], all.reduce((out, p) => out.concat(((p.workflows.procedure && p.workflows.procedure.items) || []).map(r => [p.urn, p.encounterId, dn(p, deid), r.kind, r.description, r.status, f(r.requestTime), r.by || '', f(r.startedAt), f(r.completionTime), r.completionTime ? U.minsBetween(r.requestTime, r.completionTime) : '', D.isOpenOrder(r), r.endReason])), [])); }
+    if (kind === 'x-notes') { name = 'Notes_CNR'; csv = U.csv(['MRN', 'Encounter', 'Name', 'Time', 'Type', 'Note', 'By'], all.reduce((out, p) => out.concat((p.notes || []).map(n => [p.urn, p.encounterId, dn(p, deid), f(n.at), D.NOTE_TYPES[n.type] || n.type, deid ? (n.text || '').split(p.name).join(U.initials(p.name)) : n.text, n.by])), [])); }
     if (kind === 'x-audit') { name = 'Event_Audit_Trail'; const pm = S.state.patients; csv = U.csv(['EventID', 'Timestamp', 'TimestampUTC', 'MRN', 'Encounter', 'Workflow', 'EventType', 'PreviousStatus', 'NewStatus', 'User', 'Role', 'Station', 'Notes', 'Checksum'], S.state.events.map(e => [e.id, f(e.ts), e.ts, e.urn, e.encounterId, e.workflow, e.eventType, e.prev, e.next, e.user, e.role, e.device, deid && pm[e.patientId] ? e.notes.split(pm[e.patientId].name).join(U.initials(pm[e.patientId].name)) : e.notes, e.hash])); }
     U.download(`PulseED_${name}_${S.device.mode === 'demo' ? 'DEMO_' : ''}${U.stamp()}.csv`, csv);
     logExport(name + '.csv');
@@ -1146,6 +1328,16 @@
     open: needUser(UI.patientModal),
     reassess: needUser(UI.reassessModal),
     bed: needUser(UI.bedModal),
+    assign: needUser(UI.assignModal),
+    place: needUser(UI.placeModal),
+    cnr: needUser(id => UI.recordCnr(id).catch(e => UI.toast(e.message, 'error'))),
+    found: needUser(UI.foundModal),
+    note: needUser(id => UI.noteModal(id)),
+    ostat: needUser(id => {
+      const [pid, item, status] = id.split('|'), p = fresh(pid); if (!p) return;
+      const it = (p.workflows.procedure.items || []).find(x => x.id === item);
+      run('UPDATE_PROCEDURE', { id: pid, itemId: item, status }, `${p.urn}: ${it ? it.description : 'order'} — ${status}.`).catch(e => UI.toast(e.message, 'error'));
+    }),
     proc: needUser(UI.procModal),
     exit: needUser(id => UI.exitModal(id)),
     reopen: needUser(UI.reopenModal),
@@ -1169,7 +1361,7 @@
       const r = D.verifyChain(S.state);
       r.ok ? UI.toast(`Audit trail intact — ${r.checked} events verified.`) : UI.toast(`AUDIT TRAIL ALTERED at event ${r.checked + 1} (${U.full(r.brokenAt.ts)} · ${r.brokenAt.eventType}). Inform the department lead.`, 'error');
     },
-    'x-master': needLeader(UI.exportCsv), 'x-vitals': needLeader(UI.exportCsv), 'x-bed': needLeader(UI.exportCsv), 'x-proc': needLeader(UI.exportCsv), 'x-audit': needLeader(UI.exportCsv),
+    'x-master': needLeader(UI.exportCsv), 'x-vitals': needLeader(UI.exportCsv), 'x-bed': needLeader(UI.exportCsv), 'x-proc': needLeader(UI.exportCsv), 'x-notes': needLeader(UI.exportCsv), 'x-audit': needLeader(UI.exportCsv),
     'x-backup': needLeader(UI.exportBackup),
     import: needUser(() => {
       if (!D.isSupervisor(S.user)) return UI.toast('Only a Charge Nurse or Admin can restore a backup.', 'error');

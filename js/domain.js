@@ -1,10 +1,12 @@
 /* PulseED Reassessment Area Management System — domain model: workflow rules, state transitions, timing and metrics.
  * Pure functions only (no DOM, no storage) so every rule can be unit-tested in tests/tests.html.
  *
- * The model is deliberately small. A patient waits in the reassessment area for one or more of three things:
- *   Vital signs monitoring · a bed · a procedure / treatment / radiology imaging.
- * The patient leaves PulseED when a bed is assigned, when discharged (with the reason: home, DAMA, absconded, LWBS, …)
- * or when the entry was a mistake. Nothing is tracked after that: the patient's care continues in the hospital system. */
+ * The model is deliberately small. A patient waits in the reassessment area for one or more of three things, all at once if needed:
+ *   Vital signs monitoring · a bed · one or more orders (procedure / treatment / radiology imaging).
+ * The bed has two steps: a bed is ASSIGNED (the patient stays in the area, waiting to be moved), then the patient is PLACED on it.
+ * The patient leaves PulseED when placed on a bed, when discharged (with the reason: home, DAMA, absconded, LWBS, …)
+ * or when the entry was a mistake. Nothing is tracked after that: the patient's care continues in the hospital system.
+ * Notes have a type; "CNR" (called, not around) flags the patient on the dashboard so staff call again before the next vital signs. */
 (function (PE) {
   'use strict';
   const U = PE.util;
@@ -16,8 +18,11 @@
   D.CTAS = ['CTAS 1', 'CTAS 2', 'CTAS 3', 'CTAS 4', 'CTAS 5', 'Other'];
   D.PROC_KINDS = ['Procedure', 'Treatment', 'Radiology Imaging'];
   D.PROC_STATUS = ['Waiting', 'In Progress', 'Done', 'Cancelled'];
-  D.PROC_TERMINAL = ['Done', 'Cancelled'];
-  D.EXIT_TYPES = { bed: 'Bed assigned', discharged: 'Discharged', error: 'Entered in error' };
+  D.PROC_TERMINAL = ['Done', 'Cancelled', 'Closed at exit'];
+  D.EXIT_TYPES = { bed: 'Placed on bed', discharged: 'Discharged', error: 'Entered in error' };
+  /** Note types. CNR = called, not around: the patient was called (e.g. for vital signs) but was not in the waiting area. */
+  D.NOTE_TYPES = { cnr: 'CNR — called, not around', nursing: 'Nursing note', refused: 'Patient refused', escalated: 'Escalated to physician',
+    medication: 'Medication given', pain: 'Pain reassessed', family: 'Family / social', other: 'Other' };
   /** Quick picks for the discharge reason. Staff can also type any other reason. */
   D.DISCHARGE_REASONS = ['Discharged home', 'DAMA', 'Absconded', 'LWBS', 'Transferred'];
   D.EXIT_NEEDS_REASON = ['discharged', 'error'];
@@ -26,7 +31,7 @@
   D.RuleError = RuleError;
   const fail = (msg, code) => { throw new RuleError(msg, code); };
 
-  D.emptyState = () => ({ schema: 3, rev: 0, patients: {}, events: [], chainAnchor: '0000000000000000', updatedAt: null });
+  D.emptyState = () => ({ schema: 4, rev: 0, patients: {}, events: [], chainAnchor: '0000000000000000', updatedAt: null });
 
   D.isSupervisor = user => !!user && PE.SUPERVISOR_ROLES.includes(user.role);
   D.isLeader = user => !!user && PE.LEADER_ROLES.includes(user.role);
@@ -34,15 +39,48 @@
   /** When the patient left PulseED. */
   D.leftAt = p => (p.exit ? p.exit.time : null);
   D.activeWfs = p => D.WF_KEYS.filter(k => p.workflows[k] && p.workflows[k].active);
-  /** "Discharged — DAMA", "Bed assigned — Bed 12". */
-  D.exitText = x => (!x ? '' : x.type === 'bed' ? `Bed assigned — ${x.bed}` : x.type === 'discharged' ? `Discharged — ${x.reason}` : `Entered in error — ${x.reason}`);
+  const isOpen = it => !D.PROC_TERMINAL.includes(it.status);
+  D.isOpenOrder = isOpen;
+  /** Orders (procedure / treatment / imaging) still waiting or in progress. */
+  D.openOrders = p => ((p.workflows.procedure && p.workflows.procedure.items) || []).filter(isOpen);
+  D.orderText = it => `${it.kind}: ${it.description}`;
+  /** "Discharged — DAMA", "Placed on bed — Bed 12". */
+  D.exitText = x => (!x ? '' : x.type === 'bed' ? `Placed on bed — ${x.bed}` : x.type === 'discharged' ? `Discharged — ${x.reason}` : `Entered in error — ${x.reason}`);
 
   /**
-   * Records saved by the earlier, detailed version (ED beds, front areas, bed allocation, consent) are read in the
-   * new shape so nothing is lost or shown wrongly. Idempotent: an up-to-date record is returned unchanged.
+   * Records saved by earlier versions are read in the current shape so nothing is lost or shown wrongly:
+   * v1/v2 (the detailed version: ED beds, front areas, bed allocation) → v3 (one procedure, bed assigned = left)
+   * → v4 (several orders, two-step bed, notes and CNR). Idempotent: an up-to-date record is returned unchanged.
+   * Order ids are derived from the patient id, so every station and the server upgrade a record to the same ids.
    */
   D.upgradePatient = p => {
-    if (!p || !p.workflows || p.schemaV === 3) return p;
+    if (!p || !p.workflows || p.schemaV === 4) return p;
+    if (p.schemaV !== 3) upgradeV3(p);
+    const oldProc = (p.pastEpisodes || []).filter(e => e.wf === 'procedure');
+    const ordersFrom = r => {
+      const items = [];
+      oldProc.concat(r && r.requestTime ? [r] : []).forEach(e => {
+        if (!e.requestTime) return;
+        items.push({ id: `${p.id}:o${items.length + 1}`, kind: e.kind || 'Procedure', description: e.description || e.plannedProcedure || '—', status: e.status || 'Waiting', requestTime: e.requestTime,
+          startedAt: null, completionTime: e.completionTime || null, endTime: e.endTime || null, endReason: e.endReason || null, by: '' });
+      });
+      return { active: !!(r && r.active) && items.some(isOpen), startTime: items.length ? items[0].requestTime : null, items, endTime: (r && r.endTime) || null, endReason: (r && r.endReason) || null };
+    };
+    const wfV4 = w => {
+      if (!w) return;
+      if (w.procedure && !Array.isArray(w.procedure.items)) w.procedure = ordersFrom(w.procedure);
+      const b = w.bed;
+      if (b && !('placedAt' in b)) { b.placedAt = b.assignedAt || null; b.assignedBy = b.assignedBy || null; }
+    };
+    if (p.exit && p.exit.snapshot) { if (p.schemaV !== 3) upgradeV3({ workflows: p.exit.snapshot }); wfV4(p.exit.snapshot); }
+    wfV4(p.workflows);
+    if (oldProc.length) p.pastEpisodes = p.pastEpisodes.filter(e => e.wf !== 'procedure');
+    p.notes = p.notes || [];
+    p.cnr = p.cnr || null;
+    p.schemaV = 4;
+    return p;
+  };
+  function upgradeV3(p) {
     const b = p.workflows.bed || {}, r = p.workflows.procedure || {};
     if (!('bookedAt' in b)) {
       p.workflows.bed = { active: !!b.active, bookedAt: b.addedTime || null, bookedBy: b.addedTime ? (b.bookedBy || 'Not recorded') : null, specialty: b.intendedSpecialty || '',
@@ -61,9 +99,7 @@
     }
     if (p.status === 'inED') p.status = 'exited'; // was on an ED bed: in this system that means the bed was assigned
     delete p.front; delete p.ed; delete p.release;
-    p.schemaV = 3;
-    return p;
-  };
+  }
 
   // ------------------------------------------------------------------ timing
 
@@ -93,9 +129,27 @@
     const b = p.workflows.bed; const m = U.minsBetween(b.bookedAt, b.assignedAt || now);
     return { mins: m, level: D.waitLevel(m, s.bedWaitAmberMin, s.bedWaitRedMin) };
   };
-  D.procWait = (p, s, now = Date.now()) => {
-    const r = p.workflows.procedure; const m = U.minsBetween(r.requestTime, r.completionTime || now);
+  /** Bed assigned but the patient not yet moved onto it: time since the assignment. */
+  D.placeWait = (p, s, now = Date.now()) => {
+    const b = p.workflows.bed; const m = U.minsBetween(b.assignedAt, b.placedAt || now);
+    return { mins: m, level: D.waitLevel(m, s.placeWaitAmberMin || 20, s.placeWaitRedMin || 45) };
+  };
+  /** One order: requested → done (or now). */
+  D.orderWait = (it, s, now = Date.now()) => {
+    const m = U.minsBetween(it.requestTime, it.completionTime || now);
     return { mins: m, level: D.waitLevel(m, s.procWaitAmberMin, s.procWaitRedMin) };
+  };
+  /** The patient's longest-waiting open order. */
+  D.procWait = (p, s, now = Date.now()) => {
+    const open = D.openOrders(p);
+    const m = open.reduce((x, it) => Math.max(x, U.minsBetween(it.requestTime, now)), 0);
+    return { mins: m, level: D.waitLevel(m, s.procWaitAmberMin, s.procWaitRedMin), n: open.length };
+  };
+  /** CNR: when the patient was last called and not found, and when to call again. */
+  D.cnrInfo = (p, s, now = Date.now()) => {
+    const c = p.cnr; if (!c) return null;
+    const recallAt = U.toMs(c.at) + (s.cnrRecallMin || 10) * 60000;
+    return { count: c.count, since: c.since, at: c.at, by: c.by, recallAt, due: now >= recallAt, mins: U.minsBetween(c.at, now) };
   };
 
   /** Most urgent first: CTAS 1, overdue (longest first), due soon, then by due time. */
@@ -111,12 +165,9 @@
   const newVitals = (now, active) => ({ active, startTime: active ? U.iso(now) : null, lastReassessment: null, reassessments: [], endTime: null, endReason: null });
   const newBed = (now, active, bk = {}) => ({
     active, bookedAt: active ? U.iso(now) : null, bookedBy: active ? bk.bookedBy : null, specialty: active ? bk.specialty || '' : null,
-    assignedBed: null, assignedAt: null, endTime: null, endReason: null,
+    assignedBed: null, assignedAt: null, assignedBy: null, placedAt: null, endTime: null, endReason: null,
   });
-  const newProc = (now, active, d = {}) => ({
-    active, kind: active ? d.kind : null, description: active ? d.description : null,
-    status: active ? 'Waiting' : null, requestTime: active ? U.iso(now) : null, completionTime: null, endTime: null, endReason: null,
-  });
+  const newProc = () => ({ active: false, startTime: null, items: [], endTime: null, endReason: null });
 
   // ------------------------------------------------------------------ validation helpers
 
@@ -152,8 +203,18 @@
     if (!description) fail(`Say which ${kind.toLowerCase()} is needed.`);
     return { kind, description };
   }
+  /** One or more orders: payload.orders = [{kind, description}], or a single kind + description. Blank rows are ignored. */
+  function validOrders(d) {
+    const list = Array.isArray(d.orders) ? d.orders.filter(o => o && U.norm(o.description)) : [{ kind: d.kind, description: d.description }];
+    if (!list.length) fail('Add at least one procedure, treatment or imaging request.');
+    if (list.length > 12) fail('Add up to 12 orders at a time.');
+    const out = list.map(validProc);
+    const seen = new Set();
+    out.forEach(o => { const k = U.key(o.kind + '|' + o.description); if (seen.has(k)) fail(`${o.kind}: ${o.description} is listed twice.`); seen.add(k); });
+    return out;
+  }
   const startNote = (k, p, s) => (k === 'bed' ? `Bed booked by ${p.workflows.bed.bookedBy}${p.workflows.bed.specialty ? ' · ' + p.workflows.bed.specialty : ''}`
-    : k === 'procedure' ? `${p.workflows.procedure.kind}: ${p.workflows.procedure.description}` : `Interval: ${intervalText(p.ctas, s)}`);
+    : `Interval: ${intervalText(p.ctas, s)}`);
 
   // ------------------------------------------------------------------ reducer
 
@@ -176,7 +237,7 @@
     });
     const a = action.payload || {};
     const get = () => {
-      const p = state.patients[a.id];
+      const p = D.upgradePatient(state.patients[a.id]);
       if (!p) fail('Patient record not found — it may have been removed on another station.', 'NOT_FOUND');
       if (a.expectedVersion != null && p.version !== a.expectedVersion && action.type !== 'RECORD_REASSESSMENT')
         fail(`${p.urn} was changed by ${p.updatedBy || 'another user'} at ${U.t24(p.updatedAt)} while you were editing. Re-open it to see the latest details.`, 'CONFLICT');
@@ -185,6 +246,21 @@
     const getActive = () => { const p = get(); if (p.status !== 'active') fail(`${p.urn} has already left the reassessment area (${D.exitText(p.exit)}).`, 'EXITED'); return p; };
     const touch = p => { p.version = (p.version || 0) + 1; p.updatedAt = U.iso(now); p.updatedBy = user.name; };
     const archive = (p, key) => { (p.pastEpisodes = p.pastEpisodes || []).push(Object.assign({ wf: key, ctas: p.ctas }, U.clone(p.workflows[key]))); };
+    /** Adds orders to the patient's procedure / treatment / imaging list (opening it if nothing was open). */
+    const addOrders = (p, orders) => {
+      const r = p.workflows.procedure;
+      orders.forEach(o => {
+        if (D.openOrders(p).some(x => U.key(x.kind + '|' + x.description) === U.key(o.kind + '|' + o.description))) fail(`${p.urn} already has ${o.kind}: ${o.description} open.`, 'DUPLICATE');
+      });
+      if (!r.active) Object.assign(r, { active: true, startTime: U.iso(now), endTime: null, endReason: null });
+      orders.forEach(o => {
+        const it = { id: `${p.id}:o${r.items.length + 1}`, kind: o.kind, description: o.description, status: 'Waiting', requestTime: U.iso(now), startedAt: null, completionTime: null, endTime: null, endReason: null, by: user.name };
+        r.items.push(it);
+        ev(p, D.WF.procedure, 'Order Added', 'None', 'Waiting', D.orderText(it));
+      });
+    };
+    /** The patient turned up again after a CNR. */
+    const cnrFound = p => { if (!p.cnr) return ''; const n = p.cnr.count; p.cnr = null; return ` Found after CNR ×${n}.`; };
 
     let p = null;
     switch (action.type) {
@@ -193,14 +269,15 @@
         const wf = a.workflows || {};
         if (!wf.vitals && !wf.bed && !wf.procedure) fail('Tick at least one need: vital signs, bed, or procedure / imaging.');
         const bk = wf.bed ? validBooking(a) : {};
-        const proc = wf.procedure ? validProc(a) : {};
-        p = Object.assign({ id: a.id || U.uuid(), schemaV: 3, status: 'active', exit: null, createdAt: U.iso(now), createdBy: user.name, version: 0, pastEpisodes: [] }, det);
-        p.workflows = { vitals: newVitals(now, !!wf.vitals), bed: newBed(now, !!wf.bed, bk), procedure: newProc(now, !!wf.procedure, proc) };
+        const orders = wf.procedure ? validOrders(a) : [];
+        p = Object.assign({ id: a.id || U.uuid(), schemaV: 4, status: 'active', exit: null, createdAt: U.iso(now), createdBy: user.name, version: 0, pastEpisodes: [], notes: [], cnr: null }, det);
+        p.workflows = { vitals: newVitals(now, !!wf.vitals), bed: newBed(now, !!wf.bed, bk), procedure: newProc() };
         touch(p);
         state.patients[p.id] = p;
-        const names = D.activeWfs(p).map(k => D.WF[k]);
+        const names = D.WF_KEYS.filter(k => wf[k]).map(k => D.WF[k]);
         ev(p, names.join(', '), 'Patient Registered', 'None', 'Active', `${p.name} · ${p.ctas} · ${p.diagnosis}. Needs: ${names.join(', ')}.`);
         D.activeWfs(p).forEach(k => ev(p, D.WF[k], k === 'bed' ? 'Bed Booked' : 'Episode Started', 'None', 'Active', startNote(k, p, s)));
+        if (orders.length) addOrders(p, orders);
         if (p.ctas === 'CTAS 1') ev(p, D.WF.vitals, 'Safety Alert', '', 'CTAS 1 in reassessment area', 'CTAS 1 patients need a resus bed, or any free monitored ED bed if resus is full, and continuous observation.');
         break;
       }
@@ -232,14 +309,82 @@
         if (t < floor && Math.floor(t / 60000) === Math.floor(floor / 60000)) t = Math.min(floor + 1000, now);
         if (t < floor) fail(`Time must be after the ${v.lastReassessment ? 'previous reassessment' : 'start of monitoring'} (${U.t24(floor)}).`);
         const before = D.vitalsTiming(p, s, t);
+        const note = U.norm(a.note);
+        const noteType = a.noteType && a.noteType !== 'cnr' && D.NOTE_TYPES[a.noteType] ? a.noteType : 'nursing';
         v.reassessments.push(U.iso(t));
         v.lastReassessment = U.iso(t);
+        const found = cnrFound(p);
+        if (note) p.notes.push({ id: `${p.id}:n${p.notes.length + 1}`, at: U.iso(now), by: user.name, type: noteType, text: note });
         touch(p);
         const after = D.vitalsTiming(p, s, now);
         ev(p, D.WF.vitals, 'Reassessment Recorded',
           before.state === 'overdue' ? `Overdue ${U.dur(before.overdueMin)}` : before.label || 'Due',
           after.due ? `Next due ${U.t24(after.due)}` : after.label,
-          `Vital signs taken ${U.t24(t)}${t < now - 60000 ? ' (back-dated)' : ''}.${a.note ? ' ' + U.norm(a.note) : ''}`);
+          `Vital signs taken ${U.t24(t)}${t < now - 60000 ? ' (back-dated)' : ''}.${found}${note ? ` ${D.NOTE_TYPES[noteType]}: ${note}` : ''}`);
+        break;
+      }
+
+      case 'ADD_NOTE': {
+        p = getActive();
+        const type = a.type;
+        if (!D.NOTE_TYPES[type]) fail('Choose the type of note.');
+        const text = U.norm(a.text);
+        if (type !== 'cnr' && !text) fail('Write the note.');
+        if (text.length > 500) fail('Keep the note under 500 characters.');
+        const t = U.iso(now);
+        p.notes.push({ id: `${p.id}:n${p.notes.length + 1}`, at: t, by: user.name, type, text });
+        if (type === 'cnr') {
+          const c = p.cnr;
+          p.cnr = { since: c ? c.since : t, at: t, count: (c ? c.count : 0) + 1, by: user.name };
+          ev(p, 'Notes', 'Called, Not Around (CNR)', c ? `CNR ×${c.count}` : 'In the area', `CNR ×${p.cnr.count}`,
+            `Called at ${U.t24(now)}; not in the waiting area. Call again by ${U.t24(now + (s.cnrRecallMin || 10) * 60000)}.${text ? ' ' + text : ''}`);
+        } else ev(p, 'Notes', 'Note Added', '', D.NOTE_TYPES[type], text);
+        touch(p);
+        break;
+      }
+
+      case 'CLEAR_CNR': {
+        p = getActive();
+        if (!p.cnr) fail(`${p.urn} is not marked CNR.`, 'NOCHANGE');
+        const n = p.cnr.count;
+        p.cnr = null;
+        ev(p, 'Notes', 'Patient Found', `CNR ×${n}`, 'In the area', U.norm(a.note) || 'Patient is back in the waiting area.');
+        touch(p);
+        break;
+      }
+
+      case 'ASSIGN_BED': {
+        // Step 1 of 2: a bed is chosen. The patient stays in the area until placed on it (EXIT type "bed").
+        p = getActive();
+        const bed = U.norm(a.bed);
+        if (!bed) fail('Choose the bed to assign.');
+        let b = p.workflows.bed;
+        if (!b.active) {
+          const bk = validBooking(a);
+          if (b.bookedAt) archive(p, 'bed');
+          p.workflows.bed = b = newBed(now, true, bk);
+          ev(p, D.WF.bed, 'Bed Booked', 'None', 'Active', startNote('bed', p, s));
+        }
+        if (U.key(b.assignedBed) === U.key(bed)) fail(`${bed} is already assigned to ${p.urn}.`, 'NOCHANGE');
+        const taken = D.activePatients(state).find(x => x.id !== p.id && x.workflows.bed.active && U.key(x.workflows.bed.assignedBed) === U.key(bed));
+        if (taken) fail(`${bed} is already assigned to ${taken.urn}, who has not been placed yet. Choose another bed, or change ${taken.urn}'s bed first.`, 'BED_TAKEN');
+        const prev = b.assignedBed, note = U.norm(a.note);
+        if (!prev) b.assignedAt = U.iso(now);
+        b.assignedBed = bed; b.assignedBy = user.name;
+        touch(p);
+        ev(p, D.WF.bed, prev ? 'Bed Changed' : 'Bed Assigned', prev || 'Waiting for bed', bed,
+          (prev ? 'Patient still waiting to be placed.' : `Booked by ${b.bookedBy} at ${U.t24(b.bookedAt)}; assigned after ${U.dur(D.bedWait(p, s, now).mins)}. Waiting to be placed on the bed.`) + (note ? ' ' + note : ''));
+        break;
+      }
+
+      case 'UNASSIGN_BED': {
+        p = getActive();
+        const b = p.workflows.bed;
+        if (!b.active || !b.assignedBed) fail(`${p.urn} has no bed assigned.`);
+        const reason = U.norm(a.reason); if (!reason) fail('Give a reason for cancelling the bed assignment.');
+        ev(p, D.WF.bed, 'Bed Assignment Cancelled', b.assignedBed, 'Waiting for bed', reason + ' Bed wait continues from the booking time.');
+        Object.assign(b, { assignedBed: null, assignedAt: null, assignedBy: null });
+        touch(p);
         break;
       }
 
@@ -256,22 +401,37 @@
       }
 
       case 'UPDATE_PROCEDURE': {
+        // One order of the patient's list. itemId may be left out when only one order is open.
         p = getActive();
-        const r = p.workflows.procedure;
-        if (!r.active) fail(`${p.urn} has no open procedure / treatment / imaging.`);
-        const f = validProc({ kind: a.kind || r.kind, description: a.description || r.description });
-        const status = a.status || r.status;
+        const r = p.workflows.procedure, open = D.openOrders(p);
+        const it = a.itemId ? r.items.find(x => x.id === a.itemId) : open.length === 1 ? open[0] : null;
+        if (!it) fail(!open.length ? `${p.urn} has no open procedure / treatment / imaging.` : a.itemId ? 'That order was not found — it may have been changed on another station.' : 'Choose which order to update.', a.itemId ? 'NOT_FOUND' : 'RULE');
+        if (!isOpen(it)) fail(`${D.orderText(it)} is already ${it.status.toLowerCase()}.`, 'NOCHANGE');
+        const f = validProc({ kind: a.kind || it.kind, description: a.description || it.description });
+        const status = a.status || it.status;
         if (!D.PROC_STATUS.includes(status)) fail('Select a status.');
         const note = U.norm(a.note);
         if (status === 'Cancelled' && !note) fail('Give the reason for cancelling.');
         const changes = [];
-        if (f.kind !== r.kind || f.description !== r.description) changes.push(['Request Changed', `${r.kind}: ${r.description}`, `${f.kind}: ${f.description}`]);
-        if (status !== r.status) changes.push(['Status Updated', r.status, status]);
+        if (f.kind !== it.kind || f.description !== it.description) changes.push(['Request Changed', D.orderText(it), `${f.kind}: ${f.description}`]);
+        if (status !== it.status) changes.push(['Status Updated', it.status, status]);
         if (!changes.length) fail('No changes to save.', 'NOCHANGE');
-        changes.forEach(c => ev(p, D.WF.procedure, c[0], c[1], c[2], note));
-        Object.assign(r, f, { status });
-        if (status === 'Done') { r.completionTime = U.iso(now); r.active = false; r.endTime = U.iso(now); r.endReason = 'Done'; }
-        if (status === 'Cancelled') { r.active = false; r.endTime = U.iso(now); r.endReason = 'Cancelled: ' + note; }
+        const was = D.orderText(it);
+        Object.assign(it, f, { status });
+        const t = U.iso(now);
+        if (status === 'In Progress' && !it.startedAt) it.startedAt = t;
+        if (status === 'Done') Object.assign(it, { completionTime: t, endTime: t, endReason: 'Done' });
+        if (status === 'Cancelled') Object.assign(it, { endTime: t, endReason: 'Cancelled: ' + note });
+        const found = status === 'In Progress' || status === 'Done' ? cnrFound(p) : '';
+        changes.forEach(c => ev(p, D.WF.procedure, c[0], c[1], c[2], `${c[0] === 'Status Updated' ? was + '. ' : ''}${note}${found}`.trim()));
+        if (!D.openOrders(p).length) Object.assign(r, { active: false, endTime: t, endReason: 'All orders closed' });
+        touch(p);
+        break;
+      }
+
+      case 'ADD_ORDER': {
+        p = getActive();
+        addOrders(p, validOrders(a));
         touch(p);
         break;
       }
@@ -280,12 +440,12 @@
         p = getActive();
         const k = a.wf;
         if (!D.WF[k]) fail('Unknown need.');
+        if (k === 'procedure') { addOrders(p, validOrders(a)); touch(p); break; } // the order list keeps its own history
         if (p.workflows[k].active) fail(`${p.urn} already has ${D.WF[k]} open.`);
-        const prevStarted = p.workflows[k].startTime || p.workflows[k].bookedAt || p.workflows[k].requestTime;
+        const prevStarted = p.workflows[k].startTime || p.workflows[k].bookedAt;
         if (prevStarted) archive(p, k);
         if (k === 'vitals') p.workflows.vitals = newVitals(now, true);
         if (k === 'bed') p.workflows.bed = newBed(now, true, validBooking(a));
-        if (k === 'procedure') p.workflows.procedure = newProc(now, true, validProc(a));
         ev(p, D.WF[k], k === 'bed' ? 'Bed Booked' : 'Episode Started', 'None', 'Active', startNote(k, p, s));
         touch(p);
         break;
@@ -296,9 +456,10 @@
         const k = a.wf, w = p.workflows[k];
         if (!w || !w.active) fail('That need is not open.');
         const reason = U.norm(a.reason); if (!reason) fail('Give a reason for closing it.');
-        w.active = false; w.endTime = U.iso(now); w.endReason = reason;
-        if (k === 'procedure') w.status = 'Cancelled';
-        ev(p, D.WF[k], k === 'bed' ? 'Bed Booking Cancelled' : 'Episode Ended', 'Active', 'Ended', reason);
+        const t = U.iso(now);
+        w.active = false; w.endTime = t; w.endReason = reason;
+        if (k === 'procedure') D.openOrders(p).forEach(it => Object.assign(it, { status: 'Cancelled', endTime: t, endReason: 'Cancelled: ' + reason }));
+        ev(p, D.WF[k], k === 'bed' ? 'Bed Booking Cancelled' : k === 'procedure' ? 'All Orders Cancelled' : 'Episode Ended', 'Active', 'Ended', reason);
         touch(p);
         break;
       }
@@ -306,28 +467,33 @@
       case 'EXIT': {
         p = getActive();
         const type = a.type;
-        if (!D.EXIT_TYPES[type]) fail('Choose Bed assigned, Discharged or Entered in error.');
+        if (!D.EXIT_TYPES[type]) fail('Choose Placed on bed, Discharged or Entered in error.');
         const reason = U.norm(a.reason);
         if (type === 'discharged' && !reason) fail('Choose or type the discharge reason (e.g. Discharged home, DAMA, Absconded, LWBS).');
         if (type === 'error' && !reason) fail('Say what was wrong with the entry.');
-        const bed = type === 'bed' ? U.norm(a.bed) : null;
-        if (type === 'bed' && !bed) fail('Enter the bed the patient was assigned to.');
+        const b = p.workflows.bed;
+        const bed = type === 'bed' ? U.norm(a.bed) || (b.active && b.assignedBed) || '' : null;
+        if (type === 'bed' && !bed) fail('Enter the bed the patient was placed on.');
         const snapshot = U.clone(p.workflows);
         const closed = D.activeWfs(p);
         const t = U.iso(now);
         const label = D.EXIT_TYPES[type];
-        const v = p.workflows.vitals, b = p.workflows.bed, r = p.workflows.procedure;
+        const v = p.workflows.vitals, r = p.workflows.procedure;
+        const assigned = b.active && b.assignedBed ? { bed: b.assignedBed, at: b.assignedAt } : null;
         if (v.active) Object.assign(v, { active: false, endTime: t, endReason: label });
         if (b.active) {
           Object.assign(b, { active: false, endTime: t, endReason: label });
-          if (type === 'bed') Object.assign(b, { assignedBed: bed, assignedAt: t });
+          if (type === 'bed') { if (!b.assignedAt) Object.assign(b, { assignedAt: t, assignedBy: user.name }); Object.assign(b, { assignedBed: bed, placedAt: t }); }
         }
-        if (r.active) Object.assign(r, { active: false, endTime: t, endReason: label, status: r.status === 'Done' ? 'Done' : 'Closed at exit' });
+        if (r.active) { D.openOrders(p).forEach(it => Object.assign(it, { status: 'Closed at exit', endTime: t, endReason: label })); Object.assign(r, { active: false, endTime: t, endReason: label }); }
+        p.cnr = null;
         p.status = 'exited';
         p.exit = { type, label, time: t, bed, reason, by: user.name, closedWorkflows: closed, snapshot };
         touch(p);
-        ev(p, 'Exit', type === 'bed' ? 'Bed Assigned' : type === 'discharged' ? 'Discharged' : 'Entered in Error', 'In reassessment area', D.exitText(p.exit),
-          `${type === 'bed' && b.bookedAt ? `Bed booked by ${b.bookedBy} at ${U.t24(b.bookedAt)}; assigned after ${U.dur(D.bedWait(p, s, now).mins)}. ` : ''}Closed: ${closed.map(k => D.WF[k]).join(', ') || 'nothing open'}.${type === 'bed' && reason ? ' Note: ' + reason : ''}`);
+        const bedNote = type !== 'bed' || !b.bookedAt ? ''
+          : `Bed booked by ${b.bookedBy} at ${U.t24(b.bookedAt)}; ${assigned ? `${assigned.bed} assigned ${U.t24(assigned.at)} (after ${U.dur(U.minsBetween(b.bookedAt, assigned.at))}); placed ${U.dur(U.minsBetween(assigned.at, t))} after assignment` : `placed ${U.dur(D.bedWait(p, s, now).mins)} after booking`}${assigned && U.key(assigned.bed) !== U.key(bed) ? ` (on ${bed} instead of ${assigned.bed})` : ''}. `;
+        ev(p, 'Exit', type === 'bed' ? 'Placed on Bed' : type === 'discharged' ? 'Discharged' : 'Entered in Error', 'In reassessment area', D.exitText(p.exit),
+          `${bedNote}Closed: ${closed.map(k => D.WF[k]).join(', ') || 'nothing open'}.${type === 'bed' && reason ? ' Note: ' + reason : ''}`);
         break;
       }
 
@@ -414,10 +580,14 @@
     Object.values(state.patients).forEach(p => {
       (p.pastEpisodes || []).filter(e => e.wf === key).forEach(e => out.push({ p, e, ctas: e.ctas }));
       const w = p.workflows[key];
-      if (w && (w.startTime || w.bookedAt || w.requestTime)) out.push({ p, e: w, ctas: p.ctas });
+      if (w && (w.startTime || w.bookedAt)) out.push({ p, e: w, ctas: p.ctas });
     });
     return out;
   }
+  /** Every order (procedure / treatment / imaging) of every patient. */
+  const allOrders = state => Object.values(state.patients).reduce((out, p) => out.concat((p.workflows.procedure && p.workflows.procedure.items) || []), []);
+  /** Assigned → placed, for beds assigned ahead of the move (a bed assigned and placed at once is not a wait). */
+  const placeMins = e => { const a = U.toMs(e.assignedAt), b = U.toMs(e.placedAt); return !isNaN(a) && !isNaN(b) && b > a ? (b - a) / 60000 : null; };
   /** Reassessments that fell due between from and to, and how many were done on time. */
   function compliance(state, s, inWin, now, onDue) {
     let due = 0, onTime = 0;
@@ -452,7 +622,9 @@
       const at = U.toMs(e.assignedAt);
       if (!isNaN(at) && at >= from) { const m = (at - U.toMs(e.bookedAt)) / 60000; bed.push(m); put(bedH, at, m); }
     });
-    episodes(state, 'procedure').forEach(({ e }) => {
+    const place = [];
+    episodes(state, 'bed').forEach(({ e }) => { const m = placeMins(e); if (m != null && U.toMs(e.placedAt) >= from) place.push(m); });
+    allOrders(state).forEach(e => {
       const ct = U.toMs(e.completionTime);
       if (e.status === 'Done' && !isNaN(ct) && ct >= from) { const m = (ct - U.toMs(e.requestTime)) / 60000; tat.push(m); put(tatH, ct, m); }
     });
@@ -461,7 +633,7 @@
     const kpi = a => ({ n: a.length, mean: U.round(U.mean(a)), median: U.round(U.median(a)) });
     return {
       labels, hours,
-      bedWait: kpi(bed), procTat: kpi(tat),
+      bedWait: kpi(bed), procTat: kpi(tat), placeWait: kpi(place),
       compliance: { n: comp.n, pct: comp.pct, median: U.round(U.median(compH.filter(x => x.length).map(U.mean))) },
       hourly: { bed: avgSeries(bedH), tat: avgSeries(tatH), compliance: avgSeries(compH) },
     };
@@ -495,7 +667,10 @@
     discharged.forEach(p => { reasons[p.exit.reason] = (reasons[p.exit.reason] || 0) + 1; });
     const bed = [], tat = [];
     episodes(state, 'bed').forEach(({ e }) => { const at = U.toMs(e.assignedAt); if (inWin(at)) bed.push((at - U.toMs(e.bookedAt)) / 60000); });
-    episodes(state, 'procedure').forEach(({ e }) => { const ct = U.toMs(e.completionTime); if (e.status === 'Done' && inWin(ct)) tat.push((ct - U.toMs(e.requestTime)) / 60000); });
+    const place = [];
+    episodes(state, 'bed').forEach(({ e }) => { const m = placeMins(e); if (m != null && inWin(U.toMs(e.placedAt))) place.push(m); });
+    allOrders(state).forEach(e => { const ct = U.toMs(e.completionTime); if (e.status === 'Done' && inWin(ct)) tat.push((ct - U.toMs(e.requestTime)) / 60000); });
+    const cnr = all.reduce((n, p) => n + (p.notes || []).filter(x => x.type === 'cnr' && inWin(U.toMs(x.at))).length, 0);
     const kpi = a => ({ n: a.length, mean: U.round(U.mean(a)), median: U.round(U.median(a)) });
     const left = discharged.filter(p => /^(dama|absconded|lwbs)$/i.test(p.exit.reason)).length;
     return {
@@ -503,7 +678,7 @@
       exited: real.length, bedAssigned: real.filter(p => p.exit.type === 'bed').length, discharged: discharged.length,
       leftEarly: left, leftEarlyPct: real.length ? Math.round(left / real.length * 100) : 0,
       reasons: Object.keys(reasons).sort((a, b) => reasons[b] - reasons[a]).map(k => ({ label: k, n: reasons[k] })),
-      bedWait: kpi(bed), procTat: kpi(tat),
+      bedWait: kpi(bed), procTat: kpi(tat), placeWait: kpi(place), cnrCalls: cnr,
       compliance: compliance(state, s, inWin, now),
     };
   };
@@ -542,7 +717,10 @@
     const overdue = vit.filter(p => D.vitalsTiming(p, s, now).state === 'overdue').sort(D.byVitalsUrgency(s, now));
     const ctas1 = act.filter(p => p.ctas === 'CTAS 1');
     const ctasMix = D.CTAS.map(c => [c, act.filter(p => p.ctas === c).length]).filter(x => x[1]).map(x => `${x[0]}: ${x[1]}`).join(', ') || 'none';
-    const longBed = bed.filter(p => D.bedWait(p, s, now).level !== 'ok');
+    const longBed = bed.filter(p => !p.workflows.bed.assignedBed && D.bedWait(p, s, now).level !== 'ok');
+    const toPlace = bed.filter(p => p.workflows.bed.assignedBed);
+    const longPlace = toPlace.filter(p => D.placeWait(p, s, now).level !== 'ok');
+    const cnr = act.filter(p => p.cnr);
     const longProc = proc.filter(p => D.procWait(p, s, now).level !== 'ok');
     const noWf = act.filter(p => !D.activeWfs(p).length);
     const win = opts.window || { from: now - 12 * 3600000, to: now, title: 'last 12 h' };
@@ -556,19 +734,23 @@
     L.push(`- OVERDUE vital signs: ${overdue.length}`);
     overdue.forEach(p => L.push(`    • ${show(p)} ${p.ctas} — ${D.vitalsTiming(p, s, now).label}`));
     if (ctas1.length) { L.push(`- CTAS 1 IN REASSESSMENT AREA: ${ctas1.length}`); ctas1.forEach(p => L.push(`    • ${show(p)} — ${p.diagnosis}`)); }
+    if (cnr.length) { L.push(`- CNR (called, not around): ${cnr.length}`); cnr.forEach(p => { const c = D.cnrInfo(p, s, now); L.push(`    • ${show(p)} — called ${c.count}×, last ${U.t24(c.at)}`); }); }
     L.push('', `[B] BACKGROUND (${win.title})`);
-    L.push(`- Left the area: ${st.exited} (bed assigned ${st.bedAssigned}, discharged ${st.discharged}${st.reasons.length ? ': ' + st.reasons.map(r => `${r.label} ${r.n}`).join(', ') : ''})`);
-    L.push(`- Bed wait from booking to assignment: median ${st.bedWait.median ?? '—'} min (n=${st.bedWait.n}) | Procedure / imaging done: median ${st.procTat.median ?? '—'} min (n=${st.procTat.n}) | Vital signs on time: ${st.compliance.pct ?? '—'}% (n=${st.compliance.n})`);
+    L.push(`- Left the area: ${st.exited} (placed on bed ${st.bedAssigned}, discharged ${st.discharged}${st.reasons.length ? ': ' + st.reasons.map(r => `${r.label} ${r.n}`).join(', ') : ''})`);
+    L.push(`- Bed wait from booking to assignment: median ${st.bedWait.median ?? '—'} min (n=${st.bedWait.n}) | Bed assigned to placed: median ${st.placeWait.median ?? '—'} min (n=${st.placeWait.n}) | Procedure / imaging done: median ${st.procTat.median ?? '—'} min (n=${st.procTat.n}) | Vital signs on time: ${st.compliance.pct ?? '—'}% (n=${st.compliance.n})`);
     L.push('', '[A] ASSESSMENT');
-    L.push(`- Waiting for bed: ${bed.length}`);
-    bed.slice(0, 12).forEach(p => { const b = p.workflows.bed; L.push(`    • ${show(p)} — booked by ${b.bookedBy} at ${U.t24(b.bookedAt)}${b.specialty ? ' (' + b.specialty + ')' : ''}, waiting ${U.dur(D.bedWait(p, s, now).mins)}`); });
-    if (longProc.length) { L.push(`- Procedures / imaging waiting over ${s.procWaitAmberMin} min: ${longProc.length}`); longProc.forEach(p => L.push(`    • ${show(p)} — ${p.workflows.procedure.kind}: ${p.workflows.procedure.description} (${p.workflows.procedure.status})`)); }
+    L.push(`- Waiting for bed: ${bed.length - toPlace.length}`);
+    bed.filter(p => !p.workflows.bed.assignedBed).slice(0, 12).forEach(p => { const b = p.workflows.bed; L.push(`    • ${show(p)} — booked by ${b.bookedBy} at ${U.t24(b.bookedAt)}${b.specialty ? ' (' + b.specialty + ')' : ''}, waiting ${U.dur(D.bedWait(p, s, now).mins)}`); });
+    if (toPlace.length) { L.push(`- Bed assigned, not yet placed: ${toPlace.length}`); toPlace.forEach(p => { const b = p.workflows.bed; L.push(`    • ${show(p)} — ${b.assignedBed}, assigned ${U.t24(b.assignedAt)} (${U.dur(D.placeWait(p, s, now).mins)} ago)`); }); }
+    if (longProc.length) { L.push(`- Orders waiting over ${s.procWaitAmberMin} min: ${longProc.length} patient(s)`); longProc.forEach(p => L.push(`    • ${show(p)} — ${D.openOrders(p).map(it => `${D.orderText(it)} (${it.status})`).join('; ')}`)); }
     if (noWf.length) { L.push(`- In the area with nothing open (record an exit): ${noWf.length}`); noWf.forEach(p => L.push(`    • ${show(p)}`)); }
     L.push('', '[R] RECOMMENDATION');
     let n = 1;
     if (ctas1.length) L.push(`${n++}. Move CTAS 1 patient(s) now to a resus bed, or any free monitored ED bed if resus is full; escalate to the ED physician in charge.`);
     if (overdue.length) L.push(`${n++}. Take vital signs for the ${overdue.length} overdue patient(s) first, longest overdue at top.`);
     if (longBed.length) L.push(`${n++}. Escalate the ${longBed.length} long bed wait(s) to the bed coordinator.`);
+    if (longPlace.length) L.push(`${n++}. Move the ${longPlace.length} patient(s) whose bed is assigned but who are not yet placed.`);
+    if (cnr.length) L.push(`${n++}. Call again the ${cnr.length} CNR patient(s); escalate if still not found.`);
     if (longProc.length) L.push(`${n++}. Chase the ${longProc.length} delayed procedure / imaging request(s).`);
     if (noWf.length) L.push(`${n++}. Record the exit for patients with nothing open.`);
     if (n === 1) L.push('1. No outstanding safety actions. Continue routine vital signs schedule.');
