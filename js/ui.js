@@ -367,7 +367,7 @@
         return `
           <section class="hello">
             <div><h2>Reassessment Area <span class="status ${urgent ? 'bad' : 'ok'}">${urgent ? `${urgent} need${urgent > 1 ? '' : 's'} attention` : 'All on track'}</span></h2>
-              <p>${L.a.length} patient${L.a.length === 1 ? '' : 's'} here now · ${L.vit.length} vital signs · ${L.bed.length} waiting for bed · ${L.proc.length} procedure / imaging${L.cnr.length ? ` · <b class="tamber">${L.cnr.length} CNR</b>` : ''}${L.away.length ? ` · <b class="tsky">${L.away.length} away</b>` : ''}</p></div>
+              <p>${L.a.length} patient${L.a.length === 1 ? '' : 's'} here now · ${L.vit.length} vital signs · ${L.bed.length} waiting for bed · ${L.proc.length} procedure / imaging${L.cnr.length ? ` · <b class="tamber">${L.cnr.length} CNR</b>` : ''}${L.away.length ? ` · <b>${L.away.length} away</b>` : ''}</p></div>
             <button class="btn primary lg" data-act="new">${ic('plus')}<span>Add Patient</span></button>
           </section>
           ${cnrPanel}
