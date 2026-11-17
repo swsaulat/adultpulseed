@@ -478,3 +478,25 @@ details.more[open] > summary { margin-bottom: 8px; }
 .note.warnn span { flex: 1; }
 .sh .btn { margin-left: 8px; vertical-align: 1px; }
 @media (max-width: 640px) { .orow { grid-template-columns: 1fr auto; } .orow select { grid-column: 1 / -1; } .nrow { grid-template-columns: 1fr; } }
+
+/* ---- v3.2: handover cards, away patients ---- */
+.cnrlist li.away { background: var(--sky-bg); box-shadow: inset 3px 0 0 var(--sky); }
+.ho { display: flex; flex-direction: column; gap: 10px; max-height: 52vh; overflow-y: auto; padding: 2px 4px 2px 0; margin: 10px 0; }
+.hoc { --c: var(--sky); --l: var(--sky-bg); border: 1px solid var(--line); border-left: 6px solid var(--c); border-radius: 12px; padding: 10px 12px; background: var(--panel); }
+.hoc.sky { --c: var(--sky); --l: var(--sky-bg); } .hoc.blue { --c: var(--blue); --l: var(--blue-bg); } .hoc.amber { --c: var(--amber); --l: var(--amber-bg); }
+.hoc.green { --c: var(--green); --l: var(--green-bg); } .hoc.red { --c: var(--red); --l: var(--red-bg); } .hoc.grey { --c: var(--muted); --l: var(--panel2); }
+.hoc header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.hoc h4 { margin: 0; font-size: 14px; text-transform: uppercase; letter-spacing: .05em; color: var(--c); }
+.hol { width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center; background: var(--c); color: #fff; font-weight: 800; font-size: 16px; flex: none; }
+.hofs { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 6px; }
+.hof { background: var(--l); border-radius: 9px; padding: 6px 9px; min-width: 0; }
+.hof small { display: block; color: var(--muted); font-size: 11px; } .hof b { font-size: 13px; overflow-wrap: anywhere; }
+.hof.red { background: var(--red-bg); color: var(--red-ink); } .hof.amber { background: var(--amber-bg); color: var(--amber-ink); } .hof.green { background: var(--green-bg); color: var(--green-ink); }
+.hog { margin-top: 8px; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+.hog h5 { margin: 0; padding: 6px 10px; font-size: 12.5px; display: flex; justify-content: space-between; background: var(--panel2); }
+.hog.red h5 { background: var(--red-bg); color: var(--red-ink); } .hog.amber h5 { background: var(--amber-bg); color: var(--amber-ink); } .hog.green h5 { background: var(--green-bg); color: var(--green-ink); }
+.hog.blue h5 { background: var(--blue-bg); color: var(--blue-ink); } .hog.sky h5 { background: var(--sky-bg); color: var(--sky-ink); }
+.hog table { width: 100%; border-collapse: collapse; font-size: 12.5px; } .hog th, .hog td { text-align: left; padding: 5px 9px; border-top: 1px solid var(--line); vertical-align: top; }
+.hog th { font-size: 10.5px; text-transform: uppercase; color: var(--muted); background: var(--panel); }
+.hor { margin: 0; padding-left: 20px; } .hor li { margin: 3px 0; font-weight: 600; } .hon { white-space: pre-wrap; margin: 0; }
+.order .note { margin: 0; }
