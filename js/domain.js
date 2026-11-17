@@ -21,7 +21,11 @@
   D.PROC_TERMINAL = ['Done', 'Cancelled', 'Closed at exit'];
   D.EXIT_TYPES = { bed: 'Placed on bed', discharged: 'Discharged', error: 'Entered in error' };
   /** Note types. CNR = called, not around: the patient was called (e.g. for vital signs) but was not in the waiting area. */
-  D.NOTE_TYPES = { cnr: 'CNR — called, not around', nursing: 'Nursing note', refused: 'Patient refused', escalated: 'Escalated to physician',
+  /** Vital signs not taken because the patient is away for a known reason (not CNR): shown on the dashboard until the patient is back. */
+  D.AWAY_REASONS = ['Sent to clinic', 'Gone for procedure / imaging', 'Other'];
+  /** Why an order is waiting (noted beside Start / Done / Cancel). */
+  D.DELAY_REASONS = ['Blood test result', 'Contrast', 'Consent', 'Other'];
+  D.NOTE_TYPES = { cnr: 'CNR — called, not around', away: 'Away from the area', nursing: 'Nursing note', refused: 'Patient refused', escalated: 'Escalated to physician',
     medication: 'Medication given', pain: 'Pain reassessed', family: 'Family / social', other: 'Other' };
   /** Quick picks for the discharge reason. Staff can also type any other reason. */
   D.DISCHARGE_REASONS = ['Discharged home', 'DAMA', 'Absconded', 'LWBS', 'Transferred'];
@@ -164,7 +168,7 @@
 
   const newVitals = (now, active) => ({ active, startTime: active ? U.iso(now) : null, lastReassessment: null, reassessments: [], endTime: null, endReason: null });
   const newBed = (now, active, bk = {}) => ({
-    active, bookedAt: active ? U.iso(now) : null, bookedBy: active ? bk.bookedBy : null, specialty: active ? bk.specialty || '' : null,
+    active, bookedAt: active ? U.iso(now) : null, bookedBy: active ? bk.bookedBy : null, consultant: active ? bk.consultant : null, specialty: active ? bk.specialty || '' : null,
     assignedBed: null, assignedAt: null, assignedBy: null, placedAt: null, endTime: null, endReason: null,
   });
   const newProc = () => ({ active: false, startTime: null, items: [], endTime: null, endReason: null });
@@ -194,7 +198,11 @@
   function validBooking(d) {
     const bookedBy = U.norm(d.bookedBy);
     if (!bookedBy) fail('Enter the physician who booked the bed.');
-    return { bookedBy, specialty: U.norm(d.specialty) };
+    const consultant = U.norm(d.consultant);
+    if (!consultant) fail('Enter the consultant who approved the bed (the case was discussed with them).');
+    const specialty = U.norm(d.specialty);
+    if (specialty.length > 60) fail('Keep the specialty under 60 characters.');
+    return { bookedBy, consultant, specialty };
   }
   function validProc(d) {
     const kind = d.kind;
@@ -213,7 +221,9 @@
     out.forEach(o => { const k = U.key(o.kind + '|' + o.description); if (seen.has(k)) fail(`${o.kind}: ${o.description} is listed twice.`); seen.add(k); });
     return out;
   }
-  const startNote = (k, p, s) => (k === 'bed' ? `Bed booked by ${p.workflows.bed.bookedBy}${p.workflows.bed.specialty ? ' · ' + p.workflows.bed.specialty : ''}`
+  const bookingText = b => `${b.bookedBy}${b.consultant ? ', approved by ' + b.consultant : ''}${b.specialty ? ' · ' + b.specialty : ''}`;
+  D.bookingText = bookingText;
+  const startNote = (k, p, s) => (k === 'bed' ? `Bed booked by ${bookingText(p.workflows.bed)}`
     : `Interval: ${intervalText(p.ctas, s)}`);
 
   // ------------------------------------------------------------------ reducer
@@ -261,6 +271,8 @@
     };
     /** The patient turned up again after a CNR. */
     const cnrFound = p => { if (!p.cnr) return ''; const n = p.cnr.count; p.cnr = null; return ` Found after CNR ×${n}.`; };
+    /** Back from a known absence (clinic, procedure, …). */
+    const awayBack = p => { if (!p.away) return ''; const w = p.away.reason; p.away = null; return ` Back (was: ${w}).`; };
 
     let p = null;
     switch (action.type) {
@@ -270,7 +282,7 @@
         if (!wf.vitals && !wf.bed && !wf.procedure) fail('Tick at least one need: vital signs, bed, or procedure / imaging.');
         const bk = wf.bed ? validBooking(a) : {};
         const orders = wf.procedure ? validOrders(a) : [];
-        p = Object.assign({ id: a.id || U.uuid(), schemaV: 4, status: 'active', exit: null, createdAt: U.iso(now), createdBy: user.name, version: 0, pastEpisodes: [], notes: [], cnr: null }, det);
+        p = Object.assign({ id: a.id || U.uuid(), schemaV: 4, status: 'active', exit: null, createdAt: U.iso(now), createdBy: user.name, version: 0, pastEpisodes: [], notes: [], cnr: null, away: null }, det);
         p.workflows = { vitals: newVitals(now, !!wf.vitals), bed: newBed(now, !!wf.bed, bk), procedure: newProc() };
         touch(p);
         state.patients[p.id] = p;
@@ -310,10 +322,10 @@
         if (t < floor) fail(`Time must be after the ${v.lastReassessment ? 'previous reassessment' : 'start of monitoring'} (${U.t24(floor)}).`);
         const before = D.vitalsTiming(p, s, t);
         const note = U.norm(a.note);
-        const noteType = a.noteType && a.noteType !== 'cnr' && D.NOTE_TYPES[a.noteType] ? a.noteType : 'nursing';
+        const noteType = a.noteType && a.noteType !== 'cnr' && a.noteType !== 'away' && D.NOTE_TYPES[a.noteType] ? a.noteType : 'nursing';
         v.reassessments.push(U.iso(t));
         v.lastReassessment = U.iso(t);
-        const found = cnrFound(p);
+        const found = cnrFound(p) + awayBack(p);
         if (note) p.notes.push({ id: `${p.id}:n${p.notes.length + 1}`, at: U.iso(now), by: user.name, type: noteType, text: note });
         touch(p);
         const after = D.vitalsTiming(p, s, now);
@@ -328,6 +340,7 @@
         p = getActive();
         const type = a.type;
         if (!D.NOTE_TYPES[type]) fail('Choose the type of note.');
+        if (type === 'away') fail('Record where the patient went with "Other — away" in the vital signs form.');
         const text = U.norm(a.text);
         if (type !== 'cnr' && !text) fail('Write the note.');
         if (text.length > 500) fail('Keep the note under 500 characters.');
@@ -336,6 +349,7 @@
         if (type === 'cnr') {
           const c = p.cnr;
           p.cnr = { since: c ? c.since : t, at: t, count: (c ? c.count : 0) + 1, by: user.name };
+          p.away = null; // called and not found: no longer where we thought
           ev(p, 'Notes', 'Called, Not Around (CNR)', c ? `CNR ×${c.count}` : 'In the area', `CNR ×${p.cnr.count}`,
             `Called at ${U.t24(now)}; not in the waiting area. Call again by ${U.t24(now + (s.cnrRecallMin || 10) * 60000)}.${text ? ' ' + text : ''}`);
         } else ev(p, 'Notes', 'Note Added', '', D.NOTE_TYPES[type], text);
@@ -343,12 +357,30 @@
         break;
       }
 
-      case 'CLEAR_CNR': {
+      case 'RECORD_AWAY': {
+        // Vital signs not taken: the patient is away for a known reason (sent to clinic, gone for a procedure, other).
         p = getActive();
-        if (!p.cnr) fail(`${p.urn} is not marked CNR.`, 'NOCHANGE');
-        const n = p.cnr.count;
+        const reason = a.reason;
+        if (!D.AWAY_REASONS.includes(reason)) fail('Choose where the patient is: sent to clinic, gone for procedure / imaging, or other.');
+        const note = U.norm(a.note);
+        if (reason === 'Other' && !note) fail('Write where the patient is or why the vital signs were not taken.');
+        if (note.length > 300) fail('Keep the comment under 300 characters.');
+        const t = U.iso(now), was = p.cnr ? ` Was CNR ×${p.cnr.count}.` : '';
         p.cnr = null;
-        ev(p, 'Notes', 'Patient Found', `CNR ×${n}`, 'In the area', U.norm(a.note) || 'Patient is back in the waiting area.');
+        p.away = { reason, note, at: t, by: user.name };
+        p.notes.push({ id: `${p.id}:n${p.notes.length + 1}`, at: t, by: user.name, type: 'away', text: reason + (note ? ': ' + note : '') });
+        ev(p, 'Notes', 'Away from the Area', 'In the area', reason, `Vital signs not taken.${note ? ' ' + note : ''}${was}`);
+        touch(p);
+        break;
+      }
+
+      case 'CLEAR_CNR': {
+        // The patient is back: clears a CNR and/or an "away".
+        p = getActive();
+        if (!p.cnr && !p.away) fail(`${p.urn} is not marked CNR or away.`, 'NOCHANGE');
+        const was = [p.cnr ? `CNR ×${p.cnr.count}` : '', p.away ? 'Away: ' + p.away.reason : ''].filter(Boolean).join(' · ');
+        p.cnr = null; p.away = null;
+        ev(p, 'Notes', was.startsWith('CNR') ? 'Patient Found' : 'Patient Back', was, 'In the area', U.norm(a.note) || 'Patient is back in the waiting area.');
         touch(p);
         break;
       }
@@ -393,8 +425,8 @@
         const b = p.workflows.bed;
         if (!b.active) fail(`${p.urn} is not waiting for a bed.`);
         const bk = validBooking(a);
-        if (bk.bookedBy === b.bookedBy && bk.specialty === (b.specialty || '')) fail('No changes to save.', 'NOCHANGE');
-        ev(p, D.WF.bed, 'Booking Updated', `${b.bookedBy}${b.specialty ? ' · ' + b.specialty : ''}`, `${bk.bookedBy}${bk.specialty ? ' · ' + bk.specialty : ''}`, 'Booking time unchanged.');
+        if (bk.bookedBy === b.bookedBy && bk.consultant === (b.consultant || '') && bk.specialty === (b.specialty || '')) fail('No changes to save.', 'NOCHANGE');
+        ev(p, D.WF.bed, 'Booking Updated', bookingText(b), bookingText(bk), 'Booking time unchanged.');
         Object.assign(b, bk);
         touch(p);
         break;
@@ -417,6 +449,7 @@
         if (status !== it.status) changes.push(['Status Updated', it.status, status]);
         if (!changes.length) fail('No changes to save.', 'NOCHANGE');
         const was = D.orderText(it);
+        if (status !== it.status) it.delay = null; // a new status settles the delay
         Object.assign(it, f, { status });
         const t = U.iso(now);
         if (status === 'In Progress' && !it.startedAt) it.startedAt = t;
@@ -425,6 +458,26 @@
         const found = status === 'In Progress' || status === 'Done' ? cnrFound(p) : '';
         changes.forEach(c => ev(p, D.WF.procedure, c[0], c[1], c[2], `${c[0] === 'Status Updated' ? was + '. ' : ''}${note}${found}`.trim()));
         if (!D.openOrders(p).length) Object.assign(r, { active: false, endTime: t, endReason: 'All orders closed' });
+        touch(p);
+        break;
+      }
+
+      case 'ORDER_DELAY': {
+        // Why an order is waiting: blood test result, contrast, consent, other. reason '' = delay resolved.
+        p = getActive();
+        const open = D.openOrders(p);
+        const it = a.itemId ? p.workflows.procedure.items.find(x => x.id === a.itemId) : open.length === 1 ? open[0] : null;
+        if (!it) fail(a.itemId ? 'That order was not found — it may have been changed on another station.' : open.length ? 'Choose which order is delayed.' : `${p.urn} has no open order.`, a.itemId ? 'NOT_FOUND' : 'RULE');
+        if (!isOpen(it)) fail(`${D.orderText(it)} is already ${it.status.toLowerCase()}.`, 'NOCHANGE');
+        const reason = a.reason || '';
+        const note = U.norm(a.note);
+        if (reason && !D.DELAY_REASONS.includes(reason)) fail('Choose the reason: blood test result, contrast, consent or other.');
+        if (reason === 'Other' && !note) fail('Write the reason for the delay.');
+        if (note.length > 300) fail('Keep the comment under 300 characters.');
+        if (!reason && !it.delay) fail('No delay recorded for this order.', 'NOCHANGE');
+        const prev = it.delay ? it.delay.reason : 'No delay';
+        it.delay = reason ? { reason, note, at: U.iso(now), by: user.name } : null;
+        ev(p, D.WF.procedure, reason ? 'Order Delayed' : 'Delay Resolved', prev, reason || 'Resolved', `${D.orderText(it)}.${note ? ' ' + note : ''}`);
         touch(p);
         break;
       }
@@ -458,7 +511,7 @@
         const reason = U.norm(a.reason); if (!reason) fail('Give a reason for closing it.');
         const t = U.iso(now);
         w.active = false; w.endTime = t; w.endReason = reason;
-        if (k === 'procedure') D.openOrders(p).forEach(it => Object.assign(it, { status: 'Cancelled', endTime: t, endReason: 'Cancelled: ' + reason }));
+        if (k === 'procedure') D.openOrders(p).forEach(it => Object.assign(it, { status: 'Cancelled', endTime: t, endReason: 'Cancelled: ' + reason, delay: null }));
         ev(p, D.WF[k], k === 'bed' ? 'Bed Booking Cancelled' : k === 'procedure' ? 'All Orders Cancelled' : 'Episode Ended', 'Active', 'Ended', reason);
         touch(p);
         break;
@@ -485,8 +538,8 @@
           Object.assign(b, { active: false, endTime: t, endReason: label });
           if (type === 'bed') { if (!b.assignedAt) Object.assign(b, { assignedAt: t, assignedBy: user.name }); Object.assign(b, { assignedBed: bed, placedAt: t }); }
         }
-        if (r.active) { D.openOrders(p).forEach(it => Object.assign(it, { status: 'Closed at exit', endTime: t, endReason: label })); Object.assign(r, { active: false, endTime: t, endReason: label }); }
-        p.cnr = null;
+        if (r.active) { D.openOrders(p).forEach(it => Object.assign(it, { status: 'Closed at exit', endTime: t, endReason: label, delay: null })); Object.assign(r, { active: false, endTime: t, endReason: label }); }
+        p.cnr = null; p.away = null;
         p.status = 'exited';
         p.exit = { type, label, time: t, bed, reason, by: user.name, closedWorkflows: closed, snapshot };
         touch(p);
@@ -708,54 +761,96 @@
 
   // ------------------------------------------------------------------ handover (SBAR) — built from live data only
 
-  D.sbar = (state, s, now, opts = {}) => {
+  /**
+   * The handover as structured data: the same content feeds the on-screen cards, the .txt, the Excel file and the PDF.
+   * sections = [{ key: 'S'|'B'|'A'|'R', title, tone, facts: [[label, value, tone?]], groups: [{ title, tone, cols, rows: [{ cells, line }] }], items }]
+   */
+  D.handover = (state, s, now, opts = {}) => {
     const show = p => (opts.privacy ? `${p.urn} (${U.initials(p.name)})` : `${p.urn} ${p.name}`);
     const act = D.activePatients(state);
     const vit = act.filter(p => p.workflows.vitals.active);
-    const bed = act.filter(p => p.workflows.bed.active).sort((a, b) => D.bedWait(b, s, now).mins - D.bedWait(a, s, now).mins);
+    const bedAll = act.filter(p => p.workflows.bed.active);
+    const bed = bedAll.filter(p => !p.workflows.bed.assignedBed).sort((a, b) => D.bedWait(b, s, now).mins - D.bedWait(a, s, now).mins);
+    const toPlace = bedAll.filter(p => p.workflows.bed.assignedBed).sort((a, b) => D.placeWait(b, s, now).mins - D.placeWait(a, s, now).mins);
     const proc = act.filter(p => p.workflows.procedure.active);
+    const orders = proc.reduce((o, p) => o.concat(D.openOrders(p).map(it => ({ p, it, w: D.orderWait(it, s, now) }))), []).sort((a, b) => b.w.mins - a.w.mins);
     const overdue = vit.filter(p => D.vitalsTiming(p, s, now).state === 'overdue').sort(D.byVitalsUrgency(s, now));
     const ctas1 = act.filter(p => p.ctas === 'CTAS 1');
+    const cnr = act.filter(p => p.cnr), away = act.filter(p => p.away);
     const ctasMix = D.CTAS.map(c => [c, act.filter(p => p.ctas === c).length]).filter(x => x[1]).map(x => `${x[0]}: ${x[1]}`).join(', ') || 'none';
-    const longBed = bed.filter(p => !p.workflows.bed.assignedBed && D.bedWait(p, s, now).level !== 'ok');
-    const toPlace = bed.filter(p => p.workflows.bed.assignedBed);
+    const longBed = bed.filter(p => D.bedWait(p, s, now).level !== 'ok');
     const longPlace = toPlace.filter(p => D.placeWait(p, s, now).level !== 'ok');
-    const cnr = act.filter(p => p.cnr);
     const longProc = proc.filter(p => D.procWait(p, s, now).level !== 'ok');
+    const delayed = orders.filter(x => x.it.delay);
     const noWf = act.filter(p => !D.activeWfs(p).length);
     const win = opts.window || { from: now - 12 * 3600000, to: now, title: 'last 12 h' };
     const st = D.shiftStats(state, s, win.from, win.to + 1, now);
-    const L = [];
-    L.push(`=== PULSEED REASSESSMENT AREA HANDOVER (SBAR) — ${s.siteName} ===`);
-    L.push(`Generated: ${U.full(now)} by ${opts.user || '—'}${opts.demo ? '   [TRAINING DATA]' : ''}`, '');
-    L.push('[S] SITUATION');
-    L.push(`- Patients in the reassessment area: ${act.length} (${ctasMix})`);
-    L.push(`- Vital signs: ${vit.length} | Waiting for bed: ${bed.length} | Procedure / treatment / imaging: ${proc.length}`);
-    L.push(`- OVERDUE vital signs: ${overdue.length}`);
-    overdue.forEach(p => L.push(`    • ${show(p)} ${p.ctas} — ${D.vitalsTiming(p, s, now).label}`));
-    if (ctas1.length) { L.push(`- CTAS 1 IN REASSESSMENT AREA: ${ctas1.length}`); ctas1.forEach(p => L.push(`    • ${show(p)} — ${p.diagnosis}`)); }
-    if (cnr.length) { L.push(`- CNR (called, not around): ${cnr.length}`); cnr.forEach(p => { const c = D.cnrInfo(p, s, now); L.push(`    • ${show(p)} — called ${c.count}×, last ${U.t24(c.at)}`); }); }
-    L.push('', `[B] BACKGROUND (${win.title})`);
-    L.push(`- Left the area: ${st.exited} (placed on bed ${st.bedAssigned}, discharged ${st.discharged}${st.reasons.length ? ': ' + st.reasons.map(r => `${r.label} ${r.n}`).join(', ') : ''})`);
-    L.push(`- Bed wait from booking to assignment: median ${st.bedWait.median ?? '—'} min (n=${st.bedWait.n}) | Bed assigned to placed: median ${st.placeWait.median ?? '—'} min (n=${st.placeWait.n}) | Procedure / imaging done: median ${st.procTat.median ?? '—'} min (n=${st.procTat.n}) | Vital signs on time: ${st.compliance.pct ?? '—'}% (n=${st.compliance.n})`);
-    L.push('', '[A] ASSESSMENT');
-    L.push(`- Waiting for bed: ${bed.length - toPlace.length}`);
-    bed.filter(p => !p.workflows.bed.assignedBed).slice(0, 12).forEach(p => { const b = p.workflows.bed; L.push(`    • ${show(p)} — booked by ${b.bookedBy} at ${U.t24(b.bookedAt)}${b.specialty ? ' (' + b.specialty + ')' : ''}, waiting ${U.dur(D.bedWait(p, s, now).mins)}`); });
-    if (toPlace.length) { L.push(`- Bed assigned, not yet placed: ${toPlace.length}`); toPlace.forEach(p => { const b = p.workflows.bed; L.push(`    • ${show(p)} — ${b.assignedBed}, assigned ${U.t24(b.assignedAt)} (${U.dur(D.placeWait(p, s, now).mins)} ago)`); }); }
-    if (longProc.length) { L.push(`- Orders waiting over ${s.procWaitAmberMin} min: ${longProc.length} patient(s)`); longProc.forEach(p => L.push(`    • ${show(p)} — ${D.openOrders(p).map(it => `${D.orderText(it)} (${it.status})`).join('; ')}`)); }
-    if (noWf.length) { L.push(`- In the area with nothing open (record an exit): ${noWf.length}`); noWf.forEach(p => L.push(`    • ${show(p)}`)); }
-    L.push('', '[R] RECOMMENDATION');
-    let n = 1;
-    if (ctas1.length) L.push(`${n++}. Move CTAS 1 patient(s) now to a resus bed, or any free monitored ED bed if resus is full; escalate to the ED physician in charge.`);
-    if (overdue.length) L.push(`${n++}. Take vital signs for the ${overdue.length} overdue patient(s) first, longest overdue at top.`);
-    if (longBed.length) L.push(`${n++}. Escalate the ${longBed.length} long bed wait(s) to the bed coordinator.`);
-    if (longPlace.length) L.push(`${n++}. Move the ${longPlace.length} patient(s) whose bed is assigned but who are not yet placed.`);
-    if (cnr.length) L.push(`${n++}. Call again the ${cnr.length} CNR patient(s); escalate if still not found.`);
-    if (longProc.length) L.push(`${n++}. Chase the ${longProc.length} delayed procedure / imaging request(s).`);
-    if (noWf.length) L.push(`${n++}. Record the exit for patients with nothing open.`);
-    if (n === 1) L.push('1. No outstanding safety actions. Continue routine vital signs schedule.');
-    if (opts.notes) L.push('', '[NOTES FROM OUTGOING NURSE]', opts.notes);
-    L.push('', '=== END OF REPORT ===');
+    const med = k => (k.median == null ? '—' : `${k.median} min (n=${k.n})`);
+    const row = (cells, line) => ({ cells, line });
+    const S = { key: 'S', title: 'Situation', tone: 'sky', facts: [
+      ['Patients in the reassessment area', `${act.length} (${ctasMix})`],
+      ['Vital signs monitoring', vit.length], ['Waiting for bed', `${bedAll.length} (${toPlace.length} assigned, to move)`],
+      ['Procedure / treatment / imaging', `${proc.length} patients · ${orders.length} open orders`],
+      ['OVERDUE vital signs', overdue.length, overdue.length ? 'red' : 'green'],
+      ['CTAS 1 in the area', ctas1.length, ctas1.length ? 'red' : 'green'],
+      ['CNR (called, not around)', cnr.length, cnr.length ? 'amber' : ''], ['Away (clinic, procedure, other)', away.length, away.length ? 'amber' : '']],
+    groups: [
+      { title: 'Vital signs overdue', tone: 'red', cols: ['Patient', 'CTAS', 'Due · overdue by'], rows: overdue.map(p => { const t = D.vitalsTiming(p, s, now); return row([show(p), p.ctas, t.label], `${show(p)} ${p.ctas} — ${t.label}`); }) },
+      { title: 'CTAS 1 in the area', tone: 'red', cols: ['Patient', 'Chief complaint', 'In the area'], rows: ctas1.map(p => row([show(p), p.diagnosis, U.dur(U.minsBetween(p.createdAt, now))], `${show(p)} — ${p.diagnosis}`)) },
+      { title: 'Not in the waiting area (CNR / away)', tone: 'amber', cols: ['Patient', 'Status', 'Since', 'By'], rows: cnr.map(p => { const c = D.cnrInfo(p, s, now); return row([show(p), `CNR ×${c.count}`, U.t24(c.at), c.by], `${show(p)} — CNR: called ${c.count}×, last ${U.t24(c.at)}`); })
+        .concat(away.map(p => row([show(p), 'Away: ' + p.away.reason + (p.away.note ? ' — ' + p.away.note : ''), U.t24(p.away.at), p.away.by], `${show(p)} — away: ${p.away.reason}${p.away.note ? ' (' + p.away.note + ')' : ''} since ${U.t24(p.away.at)}`))) },
+    ] };
+    const B = { key: 'B', title: `Background (${win.title})`, tone: 'blue', facts: [
+      ['Added to the area', st.registered],
+      ['Left the area', `${st.exited} (placed on bed ${st.bedAssigned}, discharged ${st.discharged})`],
+      ['Discharge reasons', st.reasons.length ? st.reasons.map(r => `${r.label} ${r.n}`).join(', ') : '—'],
+      ['DAMA / absconded / LWBS', `${st.leftEarly} (${st.leftEarlyPct}%)`, st.leftEarlyPct >= 5 ? 'red' : ''],
+      ['Bed wait, booked → assigned (median)', med(st.bedWait)], ['Bed assigned → placed (median)', med(st.placeWait)],
+      ['Order requested → done (median)', med(st.procTat)],
+      ['Vital signs on time', st.compliance.pct == null ? '—' : `${st.compliance.pct}% (n=${st.compliance.n})`, st.compliance.pct != null && st.compliance.pct < s.complianceTargetPct ? 'red' : 'green'],
+      ['CNR calls', st.cnrCalls]], groups: [] };
+    const A = { key: 'A', title: 'Assessment', tone: 'amber', facts: [], groups: [
+      { title: 'Waiting for a bed', tone: 'amber', cols: ['Patient', 'Booked by', 'Consultant', 'Specialty', 'Booked at', 'Waiting'],
+        rows: bed.map(p => { const b = p.workflows.bed, w = D.bedWait(p, s, now); return row([show(p), b.bookedBy, b.consultant || '—', b.specialty || '—', U.t24(b.bookedAt), U.dur(w.mins)],
+          `${show(p)} — booked by ${b.bookedBy} at ${U.t24(b.bookedAt)}${b.consultant ? ', consultant ' + b.consultant : ''}${b.specialty ? ' (' + b.specialty + ')' : ''}, waiting ${U.dur(w.mins)}`); }) },
+      { title: 'Bed assigned — to move', tone: 'green', cols: ['Patient', 'Bed', 'Assigned at', 'Since assigned'],
+        rows: toPlace.map(p => { const b = p.workflows.bed; return row([show(p), b.assignedBed, U.t24(b.assignedAt), U.dur(D.placeWait(p, s, now).mins)], `${show(p)} — ${b.assignedBed}, assigned ${U.t24(b.assignedAt)} (${U.dur(D.placeWait(p, s, now).mins)} ago)`); }) },
+      { title: 'Open orders (procedure / treatment / imaging)', tone: 'blue', cols: ['Patient', 'Order', 'Status', 'Waiting', 'Delay'],
+        rows: orders.map(x => { const d = x.it.delay ? x.it.delay.reason + (x.it.delay.note ? ': ' + x.it.delay.note : '') : ''; return row([show(x.p), D.orderText(x.it), x.it.status, U.dur(x.w.mins), d || '—'], `${show(x.p)} — ${D.orderText(x.it)} (${x.it.status}, ${U.dur(x.w.mins)})${d ? ' · delay: ' + d : ''}`); }) },
+      { title: 'Nothing open — record the exit', tone: 'grey', cols: ['Patient'], rows: noWf.map(p => row([show(p)], show(p))) },
+    ] };
+    const recs = [];
+    if (ctas1.length) recs.push('Move CTAS 1 patient(s) now to a resus bed, or any free monitored ED bed if resus is full; escalate to the ED physician in charge.');
+    if (overdue.length) recs.push(`Take vital signs for the ${overdue.length} overdue patient(s) first, longest overdue at top.`);
+    if (cnr.length) recs.push(`Call again the ${cnr.length} CNR patient(s); escalate if still not found.`);
+    if (away.length) recs.push(`Check on the ${away.length} patient(s) away from the area and take vital signs when back.`);
+    if (longBed.length) recs.push(`Escalate the ${longBed.length} long bed wait(s) to the bed coordinator.`);
+    if (longPlace.length) recs.push(`Move the ${longPlace.length} patient(s) whose bed is assigned but who are not yet placed.`);
+    if (longProc.length || delayed.length) recs.push(`Chase the delayed orders (${longProc.length} long wait, ${delayed.length} with a delay reason).`);
+    if (noWf.length) recs.push('Record the exit for patients with nothing open.');
+    if (!recs.length) recs.push('No outstanding safety actions. Continue routine vital signs schedule.');
+    const R = { key: 'R', title: 'Recommendation', tone: 'green', facts: [], groups: [], items: recs };
+    return { title: `PulseED Reassessment Area Handover — ${s.siteName}`, site: s.siteName, generated: U.full(now), by: opts.user || '—', demo: !!opts.demo, window: win.title,
+      sections: [S, B, A, R], notes: opts.notes || '' };
+  };
+
+  /** The handover as plain text: clearly separated parts, easy to read, paste or print. */
+  D.handoverText = h => {
+    const W = 72, bar = c => c.repeat(W), L = [];
+    L.push(bar('='), ` PULSEED REASSESSMENT AREA HANDOVER (SBAR) — ${h.site}`, ` Generated: ${h.generated} by ${h.by}${h.demo ? '   [TRAINING DATA]' : ''}`, bar('='));
+    h.sections.forEach(sec => {
+      L.push('', bar('-'), ` [${sec.key}] ${sec.title.replace(/^[^(]+/, m => m.toUpperCase())}`, bar('-'));
+      sec.facts.forEach(([k, v]) => L.push(`  • ${k}: ${v}`));
+      sec.groups.forEach(g => {
+        if (!g.rows.length) return;
+        L.push('', `  ▸ ${g.title} (${g.rows.length})`);
+        g.rows.forEach(r => L.push(`      - ${r.line}`));
+      });
+      (sec.items || []).forEach((t, n) => L.push(`  ${n + 1}. ${t}`));
+    });
+    if (h.notes) L.push('', bar('-'), ' NOTES FROM OUTGOING NURSE', bar('-'), h.notes);
+    L.push('', bar('='), ' END OF HANDOVER', bar('='));
     return L.join('\n');
   };
+  D.sbar = (state, s, now, opts = {}) => D.handoverText(D.handover(state, s, now, opts));
 })(window.PulseED);

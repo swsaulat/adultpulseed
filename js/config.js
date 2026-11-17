@@ -2,7 +2,7 @@
 (function (PE) {
   'use strict';
 
-  PE.VERSION = '3.1.0';
+  PE.VERSION = '3.2.0';
   PE.PRODUCT = 'PulseED Reassessment Area Management System';
 
   PE.DEFAULT_SETTINGS = {

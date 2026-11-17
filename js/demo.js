@@ -11,6 +11,8 @@
   const LAST = ['Demo', 'Sample', 'Testcase', 'Training', 'Example', 'Mock', 'Placeholder'];
   const DX = ['Chest pain', 'Abdominal pain', 'Fall — hip pain', 'Shortness of breath', 'Headache', 'Fever', 'Laceration forearm', 'Back pain', 'Syncope', 'Allergic reaction', 'Ankle injury', 'Vomiting', 'Palpitations', 'Dizziness'];
   const PHYS = ['Dr Aris Thorne', 'Dr Elena Vance', 'Dr Mark Roberts', 'Dr Sara Haddad'];
+  // Consultants who approve bed bookings (made-up names).
+  const CONS = ['Dr N. Rahman (Consultant)', 'Dr L. Ortega (Consultant)', 'Dr K. Brandt (Consultant)'];
   const KIND = [['Radiology Imaging', 'CT Head / Brain'], ['Radiology Imaging', 'Portable Chest X-Ray'], ['Radiology Imaging', 'Abdominal Ultrasound'], ['Treatment', 'IV antibiotics'],
     ['Treatment', 'IV fluids & electrolytes'], ['Procedure', 'Wound Repair / Suturing'], ['Procedure', 'Fracture Reduction'], ['Radiology Imaging', 'X-Ray Limb']];
   const REASONS = ['Discharged home', 'Discharged home', 'Discharged home', 'Discharged home', 'DAMA', 'LWBS', 'Absconded', 'Transferred'];
@@ -22,7 +24,8 @@
       const between = (a, b) => a + r() * (b - a);
       const M = 60000;
       const acts = []; // { t, type, payload, who }
-      const add = (t, type, payload, who) => acts.push({ t: Math.round(t), type, payload, who: who || pick(STAFF) });
+      // Every bed booking names the consultant who approved it.
+      const add = (t, type, payload, who) => { if (payload.bookedBy && !payload.consultant) payload.consultant = CONS[acts.length % CONS.length]; acts.push({ t: Math.round(t), type, payload, who: who || pick(STAFF) }); };
 
       // ---------- 24 h of history (patients who have left) so reports have real data
       for (let i = 0; i < 90; i++) {
@@ -71,6 +74,7 @@
       admit(a1, 50, { vitals: true, procedure: true }, { kind: 'Radiology Imaging', description: 'CT Coronary Angiogram' });
       vit(a1, 33, 20); book(a1, 25, 'Dr Aris Thorne', 'Cardiology');
       ord(a1, 1, 30, 'In Progress');
+      add(now - 18 * M, 'RECORD_AWAY', { id: a1.id, reason: 'Gone for procedure / imaging', note: 'In CT for the coronary angiogram' }, STAFF[1]);
 
       const a2 = P('P-40912', 'ENC-88311', "Michael O'Neill", 'CTAS 3', 'Severe abdominal pain', 'Dr Elena Vance');
       admit(a2, 60, { vitals: true, procedure: true }, { kind: 'Radiology Imaging', description: 'Abdominal Ultrasound' });
@@ -95,6 +99,7 @@
       admit(a7, 140, { vitals: true, bed: true, procedure: true }, { bookedBy: 'Dr Sara Haddad', specialty: 'Internal Medicine', orders: [{ kind: 'Treatment', description: 'IV fluids & electrolytes' }, { kind: 'Radiology Imaging', description: 'Abdominal Ultrasound' }, { kind: 'Treatment', description: 'IV antiemetic' }] });
       vit(a7, 110, 80, 48, 16); ord(a7, 1, 120, 'In Progress'); ord(a7, 3, 125, 'Done');
       note(a7, 47, 'medication', 'Ondansetron 4 mg IV given; nausea settling.');
+      add(now - 40 * M, 'ORDER_DELAY', { id: a7.id, itemId: a7.id + ':o2', reason: 'Other', note: 'Needs a full bladder; drinking water' }, STAFF[0]);
 
       const a8 = P('P-41003', '', 'Jordan Sample', 'CTAS 3', 'Fall — suspected hip fracture', 'Dr Aris Thorne');
       admit(a8, 155, { vitals: true, procedure: true }, { kind: 'Radiology Imaging', description: 'X-Ray Limb' });
@@ -105,6 +110,7 @@
       const a9 = P('P-41011', '', 'Casey Example', 'CTAS 2', 'Head injury on anticoagulant', 'Dr Elena Vance');
       admit(a9, 22, { vitals: true, procedure: true }, { kind: 'Radiology Imaging', description: 'CT Head / Brain' });
       vit(a9, 12); note(a9, 10, 'escalated', 'GCS 15, new vomiting; Dr Vance informed.');
+      add(now - 8 * M, 'ORDER_DELAY', { id: a9.id, itemId: a9.id + ':o1', reason: 'Blood test result', note: 'Waiting for INR before CT' }, STAFF[1]);
 
       const a10 = P('P-41020', '', 'Riley Testcase', 'CTAS 4', 'Ankle injury', 'Dr Sara Haddad');
       admit(a10, 95, { procedure: true }, { kind: 'Radiology Imaging', description: 'X-Ray Limb' });
