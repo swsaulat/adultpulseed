@@ -1219,7 +1219,7 @@
       <td><input data-k="email" type="email" value="${esc(p.email || '')}" maxlength="120" placeholder="name@gmail.com" aria-label="Google email" ${p.owner ? 'readonly' : ''}></td>
       <td><input data-k="title" list="dl-titles" value="${esc(p.title || '')}" maxlength="60" placeholder="e.g. ED Head Nurse" aria-label="Job title"></td>
       <td>${p.owner ? '<b>Admin</b> (owner)' : `<select data-k="role" aria-label="Role">${opts(data.roles, p.role)}</select>`}</td>
-      <td class="c"><input type="checkbox" data-k="report" ${p.report ? 'checked' : ''} aria-label="Gets the shift report"></td>
+      <td class="c"><select data-k="report" aria-label="Gets the shift report" title="8 h = doctors' reports at 06:00, 14:00, 22:00 · 12 h = nursing reports at 07:00, 19:00">${opts(['No', '8 h (doctors)', '12 h (nursing)'], !p.report ? 'No' : p.reportShift === 'nursing' ? '12 h (nursing)' : '8 h (doctors)')}</select></td>
       <td>${p.owner ? 'Owner' : `<select data-k="access" aria-label="Sheet access" ${PE.LEADER_ROLES.includes(p.role) ? '' : 'disabled'}>${opts(['Editor', 'Viewer', 'None'], PE.LEADER_ROLES.includes(p.role) ? p.access : 'None')}</select>`}</td>
       <td class="c">${p.owner ? '✓' : `<select data-k="login" aria-label="Can sign in to PulseED" title="Shared = one login used by many people; each types their own name">${opts(['Yes', 'Shared', 'No'], p.app === false ? 'No' : p.shared ? 'Shared' : 'Yes')}</select>`}</td>
       <td class="r">${p.owner ? '' : `<button type="button" class="btn sm ghost" data-del title="Remove">${ic('x')}</button>`}</td></tr>`;
@@ -1228,7 +1228,7 @@
       title: 'Staff &amp; Access', icon: 'users', wide: true, submit: 'Save &amp; share',
       body: `${practice ? `<p class="note">${ic('shield')} <b>Practice copy (training)</b>: works exactly like the real page, but nothing is shared, emailed or given access. The emails below are examples.</p>` : ''}<p class="hint">Who can sign in to PulseED, what they can do, who gets the shift report by email, and who can open the PulseED Register in Google Drive. Each person signs in with the Google email entered here. Saving shares the register to match and removes Drive access from anyone taken off the list or set to None.</p>
         <details class="rolehelp"><summary>What each role can do</summary><p class="hint">${ROLE_HELP}</p>
-          <p class="hint"><b>Can sign in: Shared</b> = one Google login used by many people (e.g. a reassessment-area account); after signing in, each person types their own name, which is recorded on every action. <b>Sheet access</b> is for ED Leaders and Admins only; everyone else works in PulseED. <b>Shift report</b> is limited to ${lim.report} people (Gmail's daily limit); for a bigger list, enter a Google Group address as one person.</p></details>
+          <p class="hint"><b>Can sign in: Shared</b> = one Google login used by many people (e.g. a reassessment-area account); after signing in, each person types their own name, which is recorded on every action. <b>Sheet access</b> is for ED Leaders and Admins only; everyone else works in PulseED. <b>Shift report</b>: 8 h = the doctors' reports at 06:00, 14:00 and 22:00; 12 h = the nursing reports at 07:00 and 19:00 (Day and Night shifts). It is limited to ${lim.report} people (Gmail's daily limit); for a bigger list, enter a Google Group address as one person.</p></details>
         <datalist id="dl-titles">${JOB_TITLES.map(t => `<option value="${esc(t[0])}">`).join('')}</datalist>
         <div class="row wrap"><input type="search" data-q placeholder="Search name, email, title or role…" aria-label="Search staff" class="grow">
           <button type="button" class="btn ghost" data-add>${ic('plus')}Add person</button>
@@ -1244,7 +1244,7 @@
         const body = $('tbody', el);
         const count = () => {
           const rows = $$('[data-row]', el), n = sel => rows.filter(sel).length;
-          const rep = n(tr => $('[data-k="report"]', tr).checked), sh = n(tr => tr.hasAttribute('data-owner') || /Editor|Viewer/.test($('[data-k="access"]', tr).value));
+          const rep = n(tr => $('[data-k="report"]', tr).value !== 'No'), sh = n(tr => tr.hasAttribute('data-owner') || /Editor|Viewer/.test($('[data-k="access"]', tr).value));
           const lead = n(tr => tr.hasAttribute('data-owner') || /ED Leader|Admin/.test($('[data-k="role"]', tr).value));
           const over = (v, max) => (v > max ? ` <b class="tred">(limit ${max})</b>` : ` <span>of ${max}</span>`);
           $('[data-count]', el).innerHTML = `<b>${rows.length}</b> people${over(rows.length, lim.staff)} · ${lead} leaders / admins · ${rep} get the shift report${over(rep, lim.report)} · ${sh} with Sheet access${over(sh, lim.sheet)}`;
@@ -1279,7 +1279,7 @@
           // Picking a known job title fills in its usual role, report and Sheet access.
           const t = e.target.closest('[data-k="title"]'), tr = e.target.closest('tr');
           const preset = t && JOB_TITLES.find(x => x[0] === U.norm(t.value));
-          if (preset && !tr.hasAttribute('data-owner')) { $('[data-k="role"]', tr).value = preset[1]; $('[data-k="report"]', tr).checked = preset[2]; $('[data-k="access"]', tr).value = preset[3]; }
+          if (preset && !tr.hasAttribute('data-owner')) { $('[data-k="role"]', tr).value = preset[1]; $('[data-k="report"]', tr).value = preset[2] ? '8 h (doctors)' : 'No'; $('[data-k="access"]', tr).value = preset[3]; }
           // The Google Sheet is for ED Leaders and Admins only.
           const role = $('[data-k="role"]', tr), access = $('[data-k="access"]', tr);
           if (role && access) { const lead = PE.LEADER_ROLES.includes(role.value); access.disabled = !lead; if (!lead) access.value = 'None'; }
@@ -1289,7 +1289,7 @@
       },
       onSubmit: async (form, d, m) => {
         const val = (tr, k) => { const x = $(`[data-k="${k}"]`, tr); return !x ? null : x.type === 'checkbox' ? x.checked : U.norm(x.value); };
-        const staff = $$('[data-row]', form).map(tr => ({ name: val(tr, 'name'), email: (val(tr, 'email') || '').toLowerCase(), title: val(tr, 'title') || '', role: val(tr, 'role') || 'Admin', report: val(tr, 'report'), access: val(tr, 'access') || 'Owner', app: tr.hasAttribute('data-owner') ? true : val(tr, 'login') !== 'No', shared: !tr.hasAttribute('data-owner') && val(tr, 'login') === 'Shared', notes: tr.dataset.notes || '' }))
+        const staff = $$('[data-row]', form).map(tr => ({ name: val(tr, 'name'), email: (val(tr, 'email') || '').toLowerCase(), title: val(tr, 'title') || '', role: val(tr, 'role') || 'Admin', report: val(tr, 'report') !== 'No', reportShift: /^12/.test(val(tr, 'report') || '') ? 'nursing' : 'doctor', access: val(tr, 'access') || 'Owner', app: tr.hasAttribute('data-owner') ? true : val(tr, 'login') !== 'No', shared: !tr.hasAttribute('data-owner') && val(tr, 'login') === 'Shared', notes: tr.dataset.notes || '' }))
           .filter(p => p.name || p.email);
         staff.forEach((p, i) => {
           if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(p.email)) throw new D.RuleError(`${p.name || 'Row ' + (i + 1)}: enter the person's Google email.`);
