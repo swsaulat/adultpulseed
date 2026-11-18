@@ -624,6 +624,7 @@
   });
 
   UI.signInModal = (reason) => {
+    if (S.isShared() && S.adapter.pendingShared && S.adapter.token) return UI.sharedNameModal(S.adapter.pendingShared);
     if (S.isShared()) return UI.googleSignIn(reason);
     const recent = U.ls.get('pulseed:v2:recentUsers') || [];
     UI.modal({
@@ -668,7 +669,7 @@
         client_id: clientId, auto_select: false, cancel_on_tap_outside: false, itp_support: true,
         callback: async r => {
           box.innerHTML = '<p class="hint">Checking your account…</p>';
-          try { const u = await g.signIn(r.credential); S.error = null; m.close(); UI.refresh(); await S.reload(); UI.toast(`Signed in as ${u.name} (${u.role}).`); }
+          try { const u = await g.signIn(r.credential); S.error = null; m.close(); if (u.shared && !u.name) return UI.sharedNameModal(u); UI.refresh(); await S.reload(); UI.toast(`Signed in as ${u.name} (${u.role}).`); }
           catch (e) { showErr(e.message); google.accounts.id.renderButton(box, { theme: 'outline', size: 'large', shape: 'pill', text: 'continue_with' }); }
         },
       });
@@ -678,6 +679,29 @@
     if (window.google && google.accounts && google.accounts.id) return start();
     const s = Object.assign(document.createElement('script'), { src: 'https://accounts.google.com/gsi/client', async: true, onload: start, onerror: () => showErr('Google Sign-In could not load. Check the internet connection, then reload the page.') });
     document.head.appendChild(s);
+  };
+
+  /** Shared station login (one Google account for many people): each person types their own name, recorded on every action. */
+  UI.sharedNameModal = u => {
+    if (stack.some(m => m.sharedName)) return;
+    const recent = U.ls.get('pulseed:v2:recentUsers') || [];
+    const m = UI.modal({
+      title: 'Who is using this station?', icon: 'lock', locked: true, submit: 'Continue',
+      body: `<p class="note">${ic('users')}<span>Signed in with the shared station login <b>${esc(u.account || u.email || '')}</b> (${esc(u.role || 'Nurse')}). Type <b>your own name</b>: it is recorded on every action you take.</span></p>
+        ${field('Your name (as on your badge)', inp('name', '', 'required autocomplete="off" list="dl-names" autofocus maxlength="60" placeholder="e.g. J. Doe"'))}
+        ${field('Station name', inp('device', S.device.deviceName || '', 'placeholder="e.g. Reassessment Desk" maxlength="40"'), 'Shown in the audit trail. Saved on this PC.')}
+        <p class="hint">The station locks after ${esc(st().autoLockMin || 15)} minutes without use; the next person then types their own name.</p>`,
+      onSubmit: async (f, d) => {
+        const name = U.norm(d.name);
+        if (name.length < 3 || !/\s|\./.test(name)) throw new D.RuleError('Enter your full name or initial + surname (e.g. "J. Doe") so the audit trail identifies you.');
+        S.device.deviceName = U.norm(d.device); S.saveDevice();
+        const user = await S.adapter.useName(name);
+        try { U.ls.set('pulseed:v2:recentUsers', U.uniq([name, ...recent]).slice(0, 12)); } catch (e) { /* ignore */ }
+        UI.refresh(); await S.reload();
+        UI.toast(`Signed in as ${user.name} (${user.role}) on the shared station login.`);
+      },
+    });
+    m.sharedName = true;
   };
 
   // ------------------------------------------------------------------ modals: add patient
@@ -1197,14 +1221,14 @@
       <td>${p.owner ? '<b>Admin</b> (owner)' : `<select data-k="role" aria-label="Role">${opts(data.roles, p.role)}</select>`}</td>
       <td class="c"><input type="checkbox" data-k="report" ${p.report ? 'checked' : ''} aria-label="Gets the shift report"></td>
       <td>${p.owner ? 'Owner' : `<select data-k="access" aria-label="Sheet access" ${PE.LEADER_ROLES.includes(p.role) ? '' : 'disabled'}>${opts(['Editor', 'Viewer', 'None'], PE.LEADER_ROLES.includes(p.role) ? p.access : 'None')}</select>`}</td>
-      <td class="c">${p.owner ? '✓' : `<input type="checkbox" data-k="app" ${p.app !== false ? 'checked' : ''} aria-label="Can sign in to PulseED">`}</td>
+      <td class="c">${p.owner ? '✓' : `<select data-k="login" aria-label="Can sign in to PulseED" title="Shared = one login used by many people; each types their own name">${opts(['Yes', 'Shared', 'No'], p.app === false ? 'No' : p.shared ? 'Shared' : 'Yes')}</select>`}</td>
       <td class="r">${p.owner ? '' : `<button type="button" class="btn sm ghost" data-del title="Remove">${ic('x')}</button>`}</td></tr>`;
     let confirmed = false;
     UI.modal({
       title: 'Staff &amp; Access', icon: 'users', wide: true, submit: 'Save &amp; share',
       body: `${practice ? `<p class="note">${ic('shield')} <b>Practice copy (training)</b>: works exactly like the real page, but nothing is shared, emailed or given access. The emails below are examples.</p>` : ''}<p class="hint">Who can sign in to PulseED, what they can do, who gets the shift report by email, and who can open the PulseED Register in Google Drive. Each person signs in with the Google email entered here. Saving shares the register to match and removes Drive access from anyone taken off the list or set to None.</p>
         <details class="rolehelp"><summary>What each role can do</summary><p class="hint">${ROLE_HELP}</p>
-          <p class="hint"><b>Sheet access</b> is for ED Leaders and Admins only; everyone else works in PulseED. <b>Shift report</b> is limited to ${lim.report} people (Gmail's daily limit); for a bigger list, enter a Google Group address as one person.</p></details>
+          <p class="hint"><b>Can sign in: Shared</b> = one Google login used by many people (e.g. a reassessment-area account); after signing in, each person types their own name, which is recorded on every action. <b>Sheet access</b> is for ED Leaders and Admins only; everyone else works in PulseED. <b>Shift report</b> is limited to ${lim.report} people (Gmail's daily limit); for a bigger list, enter a Google Group address as one person.</p></details>
         <datalist id="dl-titles">${JOB_TITLES.map(t => `<option value="${esc(t[0])}">`).join('')}</datalist>
         <div class="row wrap"><input type="search" data-q placeholder="Search name, email, title or role…" aria-label="Search staff" class="grow">
           <button type="button" class="btn ghost" data-add>${ic('plus')}Add person</button>
@@ -1265,7 +1289,7 @@
       },
       onSubmit: async (form, d, m) => {
         const val = (tr, k) => { const x = $(`[data-k="${k}"]`, tr); return !x ? null : x.type === 'checkbox' ? x.checked : U.norm(x.value); };
-        const staff = $$('[data-row]', form).map(tr => ({ name: val(tr, 'name'), email: (val(tr, 'email') || '').toLowerCase(), title: val(tr, 'title') || '', role: val(tr, 'role') || 'Admin', report: val(tr, 'report'), access: val(tr, 'access') || 'Owner', app: tr.hasAttribute('data-owner') ? true : val(tr, 'app'), notes: tr.dataset.notes || '' }))
+        const staff = $$('[data-row]', form).map(tr => ({ name: val(tr, 'name'), email: (val(tr, 'email') || '').toLowerCase(), title: val(tr, 'title') || '', role: val(tr, 'role') || 'Admin', report: val(tr, 'report'), access: val(tr, 'access') || 'Owner', app: tr.hasAttribute('data-owner') ? true : val(tr, 'login') !== 'No', shared: !tr.hasAttribute('data-owner') && val(tr, 'login') === 'Shared', notes: tr.dataset.notes || '' }))
           .filter(p => p.name || p.email);
         staff.forEach((p, i) => {
           if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(p.email)) throw new D.RuleError(`${p.name || 'Row ' + (i + 1)}: enter the person's Google email.`);

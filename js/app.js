@@ -92,7 +92,7 @@
     if (!m || !S.user) return;
     if (Date.now() - lastInput > m * 60000) {
       S.setUser(null);
-      if (S.isShared()) S.adapter.setToken(null);
+      if (S.isShared()) { S.adapter.setToken(null); S.adapter.staffName = ''; }
       UI.closeAll(); UI.refresh(); UI.signInModal('locked');
     }
   }

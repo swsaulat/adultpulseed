@@ -93,7 +93,11 @@
       const age = Math.round((Date.now() - this.lastSync) / 1000);
       return { ok: true, label: 'Live · all stations', detail: `Connected to the PulseED register (Google). Last update ${age}s ago.` };
     }
-    setToken(t) { this.token = t; try { t ? sessionStorage.setItem(TOKEN_KEY, t) : sessionStorage.removeItem(TOKEN_KEY); } catch (e) { /* ignore */ } }
+    // Shared station login: the name the person typed, sent with every request (kept for this browser tab only).
+    get staffName() { try { return sessionStorage.getItem('pulseed:v2:staffName') || ''; } catch (e) { return this._sn || ''; } }
+    set staffName(n) { this._sn = n || ''; try { n ? sessionStorage.setItem('pulseed:v2:staffName', n) : sessionStorage.removeItem('pulseed:v2:staffName'); } catch (e) { /* ignore */ } }
+    setToken(t) { this.token = t; if (!t) { this.staffName = ''; this.pendingShared = null; } // signing out also forgets a shared-login name
+      try { t ? sessionStorage.setItem(TOKEN_KEY, t) : sessionStorage.removeItem(TOKEN_KEY); } catch (e) { /* ignore */ } }
     tokenUser() { const p = this.token && decodeJwt(this.token); return p ? { email: p.email, name: p.name } : null; }
 
     async call(action, payload, timeout = 30000) {
@@ -104,7 +108,7 @@
         const r = await fetch(this.url, {
           method: 'POST', redirect: 'follow', signal: ctrl.signal,
           headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // simple request: no CORS pre-flight to Apps Script
-          body: JSON.stringify(Object.assign({ action, idToken: this.token || undefined }, payload || {})),
+          body: JSON.stringify(Object.assign({ action, idToken: this.token || undefined, staffName: this.staffName || undefined }, payload || {})),
         });
         try { res = JSON.parse(await r.text()); } catch (e) { res = { ok: false, code: 'BAD_RESPONSE', message: 'The server sent an unexpected response. Nothing was saved — try again.' }; }
       } catch (e) {
@@ -114,6 +118,7 @@
       else if (res.code === 'NETWORK' || res.code === 'BAD_RESPONSE') { this.online = false; this.err = res.message; }
       if (!res.ok) {
         if (/^AUTH_/.test(res.code)) { this.setToken(null); S.setUser(null); if (PE.ui) PE.ui.signInModal('expired'); }
+        if (res.code === 'NAME_REQUIRED') { this.pendingShared = this.tokenUser() || {}; S.setUser(null); if (PE.ui) PE.ui.signInModal(); }
         throw new D.RuleError(res.message || 'Request failed.', res.code);
       }
       return res;
@@ -123,15 +128,25 @@
       const c = await this.call('config');
       this.config = c;
       if (this.token) {
-        try { const r = await this.call('me'); S.setUser(Object.assign({ verified: true }, r.user)); }
+        try { const r = await this.call('me'); if (r.user.shared && !r.user.name) this.pendingShared = r.user; else S.setUser(Object.assign({ verified: true }, r.user)); }
         catch (e) { if (e.code === 'FORBIDDEN') S.error = e.message; }
       }
     }
     async signIn(credential) {
       this.setToken(credential);
       const r = await this.call('me');
-      S.setUser(Object.assign({ verified: true }, r.user));
       this.since = {};
+      if (r.user.shared && !r.user.name) { this.pendingShared = r.user; return r.user; }
+      S.setUser(Object.assign({ verified: true }, r.user));
+      return r.user;
+    }
+    /** Shared station login: confirm the typed name with the server, then sign in under it. */
+    async useName(name) {
+      this.staffName = name;
+      const r = await this.call('me');
+      if (!r.user.name) { this.staffName = ''; throw new D.RuleError('Enter your full name or initial + surname (e.g. "J. Doe").'); }
+      this.pendingShared = null;
+      S.setUser(Object.assign({ verified: true }, r.user));
       return r.user;
     }
 
