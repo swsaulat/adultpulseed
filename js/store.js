@@ -172,6 +172,7 @@
       if (!S.user) return false;
       const r = await this.call('sync', { since: this.since });
       this.lastSync = Date.now();
+      this.reports = r.reports || []; // shift reports waiting to be emailed, or missed
       return this._merge(r);
     }
     async load() { if (S.user) await this.sync(); return this.state; }

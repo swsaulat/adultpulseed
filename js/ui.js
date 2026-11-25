@@ -185,6 +185,10 @@
       list: lst(L.longBed, p => `<button class="link" data-act="bed" data-id="${esc(p.id)}">${esc(p.urn)} (${esc(U.dur(D.bedWait(p, st(), now()).mins))}, booked by ${esc(p.workflows.bed.bookedBy)})</button>`) });
     if (L.longProc.length) A.push({ k: 'longproc', ic: 'syringe', label: `${L.longProc.length} procedure / imaging waiting over ${U.dur(st().procWaitRedMin)}`, note: 'Chase the request. Click a patient to update it.',
       list: lst(L.longProc, p => `<button class="link" data-act="proc" data-id="${esc(p.id)}">${esc(p.urn)} · ${esc(D.openOrders(p).map(it => it.description).join(', '))} (${esc(U.dur(D.procWait(p, st(), now()).mins))})</button>`) });
+    const rp = (S.user && S.adapter && S.adapter.reports) || [], rpMissed = rp.filter(x => x.missed).length;
+    if (rp.length) A.push({ k: 'reports', ic: 'alert', label: rpMissed ? `${rpMissed} shift report${rpMissed > 1 ? 's' : ''} not emailed` : `${rp.length} shift report${rp.length > 1 ? 's' : ''} delayed`,
+      note: 'Use Shift Handover for the handover. A Charge Nurse or leader account can also download the shift PDF.' + (rp.some(x => x.quota) ? ' Reason: daily email limit of the Google account.' : ''),
+      list: rp.map(x => `<span>${esc(x.label)}: ${x.missed ? 'not sent' : 'retrying'}</span>`).join(' · ') });
     if (UI.alertOpen && !A.some(x => x.k === UI.alertOpen)) UI.alertOpen = null;
     const open = A.find(x => x.k === UI.alertOpen);
     const chips = A.map(x => `<button class="achip ${x.pulse ? 'pulse' : ''} ${UI.alertOpen === x.k ? 'on' : ''}" data-act="alerttoggle" data-id="${x.k}" aria-expanded="${UI.alertOpen === x.k}">${ic(x.ic)}<span>${esc(x.label)}</span>${ic('chev')}</button>`).join('');
